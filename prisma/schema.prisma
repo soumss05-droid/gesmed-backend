@@ -1,0 +1,289 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// 1. Référentiel géographique et organisationnel
+// ============================================================
+
+model Drs {
+  id             String          @id @default(uuid())
+  nom            String
+  code           String          @unique
+  actif          Boolean         @default(true)
+  moughataas     Moughataa[]
+  etablissements Etablissement[]
+
+  @@map("drs")
+}
+
+model Moughataa {
+  id             String          @id @default(uuid())
+  nom            String
+  drsId          String          @map("drs_id")
+  drs            Drs             @relation(fields: [drsId], references: [id])
+  etablissements Etablissement[]
+
+  @@map("moughataa")
+}
+
+enum TypeEtablissement {
+  CAMEC
+  GAS_PROGRAMME_NATIONAL
+  GAS_DRS
+  GAS_MOUGHATAA
+  FORMATION_SANITAIRE
+}
+
+model Etablissement {
+  id                          String            @id @default(uuid())
+  nom                         String
+  type                        TypeEtablissement
+  aStockPhysique              Boolean           @map("a_stock_physique")
+  drsId                       String?           @map("drs_id")
+  drs                         Drs?              @relation(fields: [drsId], references: [id])
+  moughataaId                 String?           @map("moughataa_id")
+  moughataa                   Moughataa?        @relation(fields: [moughataaId], references: [id])
+  adresse                     String?
+  actif                       Boolean           @default(true)
+
+  userEtablissements          UserEtablissement[]
+  lots                        Lot[]
+  stocks                      Stock[]
+  requisitionsDemandees       Requisition[]     @relation("RequisitionDemandeur")
+  requisitionsNiveauActuel    Requisition[]     @relation("RequisitionNiveauActuel")
+  blExpedies                  BordereauLivraison[] @relation("BlExpediteur")
+  blRecus                     BordereauLivraison[] @relation("BlDestinataire")
+
+  @@map("etablissements")
+}
+
+// ============================================================
+// 2. Utilisateurs et droits
+// ============================================================
+
+model Utilisateur {
+  id               String              @id @default(uuid())
+  nomComplet       String              @map("nom_complet")
+  identifiant      String              @unique
+  motDePasseHash   String              @map("mot_de_passe_hash")
+  telephone        String?
+  actif            Boolean             @default(true)
+  createdAt        DateTime            @default(now()) @map("created_at")
+
+  etablissements   UserEtablissement[]
+  mouvements       MouvementStock[]
+  ecartsDecides    BlLigne[]           @relation("EcartDecideur")
+
+  @@map("utilisateurs")
+}
+
+enum Role {
+  CAMEC
+  GESTIONNAIRE_DRS
+  DIRECTEUR_DRS
+  GAS_MOUGHATAA
+  GAS_PROGRAMME_NATIONAL
+  FORMATION_SANITAIRE
+  AUDITEUR
+  ADMIN
+}
+
+model UserEtablissement {
+  id              String        @id @default(uuid())
+  utilisateurId   String        @map("utilisateur_id")
+  utilisateur     Utilisateur   @relation(fields: [utilisateurId], references: [id])
+  etablissementId String        @map("etablissement_id")
+  etablissement   Etablissement @relation(fields: [etablissementId], references: [id])
+  role            Role
+  dateDebut       DateTime      @default(now()) @map("date_debut")
+  actif           Boolean       @default(true)
+
+  @@unique([utilisateurId, etablissementId])
+  @@map("user_etablissements")
+}
+
+// ============================================================
+// 3. Produits et stocks
+// ============================================================
+
+model Produit {
+  id               String    @id @default(uuid())
+  nom              String
+  forme            String?
+  unite            String?
+  seuilMinDefaut   Int       @map("seuil_min_defaut")
+  seuilMaxDefaut   Int       @map("seuil_max_defaut")
+
+  lots             Lot[]
+  stocks           Stock[]
+  requisitionLignes RequisitionLigne[]
+  blLignes         BlLigne[]
+
+  @@map("produits")
+}
+
+model Lot {
+  id              String        @id @default(uuid())
+  produitId       String        @map("produit_id")
+  produit         Produit       @relation(fields: [produitId], references: [id])
+  etablissementId String        @map("etablissement_id")
+  etablissement   Etablissement @relation(fields: [etablissementId], references: [id])
+  numeroLot       String        @map("numero_lot")
+  datePeremption  DateTime      @map("date_peremption")
+  quantite        Int
+  dateReception   DateTime      @default(now()) @map("date_reception")
+
+  mouvements      MouvementStock[]
+  blLignes        BlLigne[]
+
+  @@map("lots")
+}
+
+enum StatutStock {
+  RUPTURE
+  SOUS_SEUIL
+  NORMAL
+  SURSTOCK
+}
+
+model Stock {
+  id              String        @id @default(uuid())
+  produitId       String        @map("produit_id")
+  produit         Produit       @relation(fields: [produitId], references: [id])
+  etablissementId String        @map("etablissement_id")
+  etablissement   Etablissement @relation(fields: [etablissementId], references: [id])
+  quantiteTotale  Int           @default(0) @map("quantite_totale")
+  seuilMin        Int           @map("seuil_min")
+  seuilMax        Int           @map("seuil_max")
+  statut          StatutStock   @default(RUPTURE)
+
+  @@unique([produitId, etablissementId])
+  @@map("stocks")
+}
+
+enum TypeMouvement {
+  ENTREE
+  SORTIE
+  AJUSTEMENT
+  BLOCAGE_ECART
+  DEBLOCAGE_ECART
+}
+
+enum ReferenceType {
+  REQUISITION
+  BL
+  MANUEL
+}
+
+model MouvementStock {
+  id             String         @id @default(uuid())
+  lotId          String         @map("lot_id")
+  lot            Lot            @relation(fields: [lotId], references: [id])
+  type           TypeMouvement
+  quantite       Int
+  dateMouvement  DateTime       @default(now()) @map("date_mouvement")
+  referenceType  ReferenceType? @map("reference_type")
+  referenceId    String?        @map("reference_id")
+  utilisateurId  String         @map("utilisateur_id")
+  utilisateur    Utilisateur    @relation(fields: [utilisateurId], references: [id])
+
+  @@map("mouvements_stock")
+}
+
+// ============================================================
+// 4. Circuit de validation (réquisitions et distribution)
+// ============================================================
+
+enum StatutRequisition {
+  BROUILLON
+  EN_ATTENTE
+  MODIFIEE_EN_ATTENTE_CONFIRMATION
+  VALIDEE
+  REJETEE
+  EXPEDIEE
+  CLOTUREE
+}
+
+model Requisition {
+  id                     String            @id @default(uuid())
+  etablissementDemandeurId String          @map("etablissement_demandeur_id")
+  etablissementDemandeur  Etablissement    @relation("RequisitionDemandeur", fields: [etablissementDemandeurId], references: [id])
+  niveauActuelId         String            @map("niveau_actuel_id")
+  niveauActuel           Etablissement     @relation("RequisitionNiveauActuel", fields: [niveauActuelId], references: [id])
+  statut                 StatutRequisition @default(BROUILLON)
+  dateCreation           DateTime          @default(now()) @map("date_creation")
+  dateDerniereMaj        DateTime          @updatedAt @map("date_derniere_maj")
+  justification          String?
+
+  lignes                 RequisitionLigne[]
+  bordereaux             BordereauLivraison[]
+
+  @@map("requisitions")
+}
+
+model RequisitionLigne {
+  id                String      @id @default(uuid())
+  requisitionId     String      @map("requisition_id")
+  requisition       Requisition @relation(fields: [requisitionId], references: [id])
+  produitId         String      @map("produit_id")
+  produit           Produit     @relation(fields: [produitId], references: [id])
+  quantiteDemandee  Int         @map("quantite_demandee")
+  quantiteValidee   Int         @map("quantite_validee")
+
+  @@map("requisition_lignes")
+}
+
+enum StatutBl {
+  ENVOYE
+  RECU_SANS_ECART
+  RECU_AVEC_ECART_BLOQUE
+  RECU_AVEC_ECART_DEBLOQUE
+}
+
+model BordereauLivraison {
+  id                          String        @id @default(uuid())
+  requisitionId               String        @map("requisition_id")
+  requisition                 Requisition   @relation(fields: [requisitionId], references: [id])
+  etablissementExpediteurId   String        @map("etablissement_expediteur_id")
+  etablissementExpediteur     Etablissement @relation("BlExpediteur", fields: [etablissementExpediteurId], references: [id])
+  etablissementDestinataireId String        @map("etablissement_destinataire_id")
+  etablissementDestinataire   Etablissement @relation("BlDestinataire", fields: [etablissementDestinataireId], references: [id])
+  dateEnvoi                   DateTime      @default(now()) @map("date_envoi")
+  dateReceptionConfirmee      DateTime?     @map("date_reception_confirmee")
+  statut                      StatutBl      @default(ENVOYE)
+
+  lignes                      BlLigne[]
+
+  @@map("bordereaux_livraison")
+}
+
+enum EcartStatut {
+  EN_ATTENTE
+  DEBLOQUE
+  MAINTENU
+}
+
+model BlLigne {
+  id                String              @id @default(uuid())
+  blId              String              @map("bl_id")
+  bl                BordereauLivraison  @relation(fields: [blId], references: [id])
+  produitId         String              @map("produit_id")
+  produit           Produit             @relation(fields: [produitId], references: [id])
+  lotId             String              @map("lot_id")
+  lot               Lot                 @relation(fields: [lotId], references: [id])
+  quantiteEnvoyee   Int                 @map("quantite_envoyee")
+  quantiteRecue     Int?                @map("quantite_recue")
+  ecart             Int?
+  ecartStatut       EcartStatut?        @map("ecart_statut")
+  ecartDecideurId   String?             @map("ecart_decideur_id")
+  ecartDecideur     Utilisateur?        @relation("EcartDecideur", fields: [ecartDecideurId], references: [id])
+  ecartMotif        String?             @map("ecart_motif")
+
+  @@map("bl_lignes")
+}
