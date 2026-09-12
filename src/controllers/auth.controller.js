@@ -27,6 +27,27 @@ async function login(req, res) {
     return res.status(401).json({ erreur: "Identifiant ou mot de passe incorrect." });
   }
 
+  // Cas particulier : l'Admin système n'est rattaché à aucun établissement.
+  // Il a accès à toute la situation nationale et gère les comptes/rôles.
+  // On le connecte directement, sans passer par la logique de rattachement.
+  if (utilisateur.estAdminSysteme) {
+    const token = jwt.sign(
+      { utilisateurId: utilisateur.id, role: "ADMIN" },
+      process.env.JWT_SECRET,
+      { expiresIn: "12h" }
+    );
+
+    return res.json({
+      token,
+      utilisateur: {
+        id: utilisateur.id,
+        nomComplet: utilisateur.nomComplet,
+        role: "ADMIN",
+        etablissement: null,
+      },
+    });
+  }
+
   const rattachementsActifs = utilisateur.etablissements.filter((r) => r.actif);
 
   if (rattachementsActifs.length === 0) {

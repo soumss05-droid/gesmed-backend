@@ -32,6 +32,22 @@ model Moughataa {
   @@map("moughataa")
 }
 
+// Un programme de santé (SIDA/Hépatite, Tuberculose, Paludisme...).
+// Chaque produit appartient à un programme, et chaque GAS Programme national
+// est rattaché à un seul programme (il y a donc plusieurs établissements
+// de type GAS_PROGRAMME_NATIONAL, un par programme).
+model Programme {
+  id             String          @id @default(uuid())
+  nom            String
+  code           String          @unique
+  actif          Boolean         @default(true)
+
+  produits       Produit[]
+  etablissements Etablissement[]
+
+  @@map("programmes")
+}
+
 enum TypeEtablissement {
   CAMEC
   GAS_PROGRAMME_NATIONAL
@@ -49,6 +65,10 @@ model Etablissement {
   drs                         Drs?              @relation(fields: [drsId], references: [id])
   moughataaId                 String?           @map("moughataa_id")
   moughataa                   Moughataa?        @relation(fields: [moughataaId], references: [id])
+  // Rempli uniquement pour un établissement de type GAS_PROGRAMME_NATIONAL :
+  // indique de quel programme (SIDA, TB, Paludisme...) il s'occupe.
+  programmeId                 String?           @map("programme_id")
+  programme                   Programme?        @relation(fields: [programmeId], references: [id])
   adresse                     String?
   actif                       Boolean           @default(true)
 
@@ -75,6 +95,10 @@ model Utilisateur {
   telephone        String?
   actif            Boolean             @default(true)
   createdAt        DateTime            @default(now()) @map("created_at")
+  // Vrai uniquement pour l'Admin système : accès à toute la situation
+  // nationale, gestion des comptes et des rôles, indépendant de tout
+  // établissement (donc pas de ligne dans UserEtablissement pour ce cas).
+  estAdminSysteme  Boolean             @default(false) @map("est_admin_systeme")
 
   etablissements   UserEtablissement[]
   mouvements       MouvementStock[]
@@ -84,14 +108,13 @@ model Utilisateur {
 }
 
 enum Role {
-  CAMEC
+  GESTIONNAIRE_CAMEC
   GESTIONNAIRE_DRS
   DIRECTEUR_DRS
   GAS_MOUGHATAA
   GAS_PROGRAMME_NATIONAL
   FORMATION_SANITAIRE
   AUDITEUR
-  ADMIN
 }
 
 model UserEtablissement {
@@ -119,6 +142,11 @@ model Produit {
   unite            String?
   seuilMinDefaut   Int       @map("seuil_min_defaut")
   seuilMaxDefaut   Int       @map("seuil_max_defaut")
+  // Tout produit appartient obligatoirement à un programme
+  // (utiliser le programme "Autre" pour ce qui ne rentre dans aucune
+  // catégorie précise).
+  programmeId      String    @map("programme_id")
+  programme        Programme @relation(fields: [programmeId], references: [id])
 
   lots             Lot[]
   stocks           Stock[]
@@ -208,6 +236,7 @@ enum StatutRequisition {
   REJETEE
   EXPEDIEE
   CLOTUREE
+  SCINDEE
 }
 
 model Requisition {
@@ -220,6 +249,14 @@ model Requisition {
   dateCreation           DateTime          @default(now()) @map("date_creation")
   dateDerniereMaj        DateTime          @updatedAt @map("date_derniere_maj")
   justification          String?
+
+  // Quand une réquisition contient des produits de plusieurs programmes,
+  // elle est scindée au niveau du GAS DRS : la réquisition d'origine passe
+  // au statut SCINDEE et donne naissance à une réquisition fille par
+  // programme, chacune envoyée au bon GAS Programme national.
+  requisitionParentId    String?           @map("requisition_parent_id")
+  requisitionParent      Requisition?      @relation("RequisitionEnfants", fields: [requisitionParentId], references: [id])
+  requisitionsEnfants    Requisition[]     @relation("RequisitionEnfants")
 
   lignes                 RequisitionLigne[]
   bordereaux             BordereauLivraison[]

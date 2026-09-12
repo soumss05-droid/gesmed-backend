@@ -107,13 +107,15 @@ async function traiterDecision(req, res) {
     );
 
     // Une modification par le GAS Programme national doit revenir au GAS DRS
-    // pour confirmation avant de poursuivre.
+    // pour confirmation avant de poursuivre. Le GAS Programme national n'a
+    // pas de drsId propre : on retrouve le bon GAS DRS via l'établissement
+    // demandeur d'origine (la formation sanitaire qui a créé la réquisition).
     if (role === "GAS_PROGRAMME_NATIONAL") {
-      const etabActuel = await prisma.etablissement.findUnique({ where: { id: etablissementId } });
+      const demandeur = await prisma.etablissement.findUnique({ where: { id: requisition.etablissementDemandeurId } });
       const gasDrs = await prisma.etablissement.findFirst({
-        where: { type: "GAS_DRS", drsId: etabActuel.drsId },
+        where: { type: "GAS_DRS", drsId: demandeur.drsId },
       });
-      const misAJour = await prisma.requisition.update({
+            const misAJour = await prisma.requisition.update({
         where: { id },
         data: { statut: "MODIFIEE_EN_ATTENTE_CONFIRMATION", niveauActuelId: gasDrs.id },
       });
@@ -122,6 +124,7 @@ async function traiterDecision(req, res) {
   }
 
   if (decision === "valider") {
+  
     const etabActuel = await prisma.etablissement.findUnique({ where: { id: etablissementId } });
     const indexActuel = ORDRE_CIRCUIT.indexOf(etabActuel.type);
     const typeSuivant = ORDRE_CIRCUIT[indexActuel + 1];
