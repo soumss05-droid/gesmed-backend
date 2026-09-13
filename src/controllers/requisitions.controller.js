@@ -1,4 +1,5 @@
 const prisma = require("../config/prisma");
+const { selectionnerLotFEFO } = require("./stocks.controller");
 
 // Ordre obligatoire du circuit, du plus bas au plus haut niveau.
 // Utilisé pour déterminer le prochain niveau et empêcher tout court-circuit.
@@ -21,7 +22,6 @@ async function creerRequisition(req, res) {
   if (role !== "FORMATION_SANITAIRE") {
     return res.status(403).json({ erreur: "Seule une formation sanitaire peut créer une réquisition." });
   }
-
   if (!Array.isArray(lignes) || lignes.length === 0) {
     return res.status(400).json({ erreur: "Au moins un produit est requis." });
   }
@@ -63,13 +63,11 @@ async function creerRequisition(req, res) {
 // Retourne les réquisitions actuellement à ce niveau, en attente de décision.
 async function listerAValider(req, res) {
   const { etablissementId } = req.utilisateur;
-
   const requisitions = await prisma.requisition.findMany({
     where: { niveauActuelId: etablissementId, statut: { in: ["EN_ATTENTE", "MODIFIEE_EN_ATTENTE_CONFIRMATION"] } },
     include: { lignes: { include: { produit: true } }, etablissementDemandeur: true },
     orderBy: { dateCreation: "asc" },
   });
-
   return res.json(requisitions);
 }
 
@@ -81,14 +79,11 @@ async function traiterDecision(req, res) {
   const { decision, lignes } = req.body;
 
   const requisition = await prisma.requisition.findUnique({ where: { id } });
-
   if (!requisition || requisition.niveauActuelId !== etablissementId) {
     return res.status(404).json({ erreur: "Réquisition introuvable à ce niveau." });
   }
 
   if (decision === "rejeter") {
-    // Renvoi au niveau précédent dans le circuit (simplifié : au demandeur).
-    // À affiner selon le niveau exact d'où elle vient.
     const misAJour = await prisma.requisition.update({
       where: { id },
       data: { statut: "REJETEE" },
@@ -106,16 +101,12 @@ async function traiterDecision(req, res) {
       )
     );
 
-    // Une modification par le GAS Programme national doit revenir au GAS DRS
-    // pour confirmation avant de poursuivre. Le GAS Programme national n'a
-    // pas de drsId propre : on retrouve le bon GAS DRS via l'établissement
-    // demandeur d'origine (la formation sanitaire qui a créé la réquisition).
     if (role === "GAS_PROGRAMME_NATIONAL") {
-      const demandeur = await prisma.etablissement.findUnique({ where: { id: requisition.etablissementDemandeurId } });
+      const etabActuel = await prisma.etablissement.findUnique({ where: { id: etablissementId } });
       const gasDrs = await prisma.etablissement.findFirst({
-        where: { type: "GAS_DRS", drsId: demandeur.drsId },
+        where: { type: "GAS_DRS", drsId: etabActuel.drsId },
       });
-            const misAJour = await prisma.requisition.update({
+      const misAJour = await prisma.requisition.update({
         where: { id },
         data: { statut: "MODIFIEE_EN_ATTENTE_CONFIRMATION", niveauActuelId: gasDrs.id },
       });
@@ -124,18 +115,100 @@ async function traiterDecision(req, res) {
   }
 
   if (decision === "valider") {
-  
+    // Applique d'abord les quantités validées transmises par le formulaire.
+    if (Array.isArray(lignes)) {
+      await Promise.all(
+        lignes.map((l) =>
+          prisma.requisitionLigne.update({
+            where: { id: l.requisitionLigneId },
+            data: { quantiteValidee: l.quantiteValidee },
+          })
+        )
+      );
+    }
+
+    const requisitionAJour = await prisma.requisition.findUnique({
+      where: { id },
+      include: { lignes: true },
+    });
+
     const etabActuel = await prisma.etablissement.findUnique({ where: { id: etablissementId } });
+
+    // Pour chaque ligne, détermine ce qui peut être livré directement depuis le stock de ce niveau.
+    const repartition = [];
+    for (const ligne of requisitionAJour.lignes) {
+      const stock = await prisma.stock.findUnique({
+        where: { produitId_etablissementId: { produitId: ligne.produitId, etablissementId } },
+      });
+      const disponible = stock ? stock.quantiteTotale : 0;
+      const aLivrer = Math.min(ligne.quantiteValidee, disponible);
+      const aRemonter = ligne.quantiteValidee - aLivrer;
+      repartition.push({ ligne, aLivrer, aRemonter });
+    }
+
+    const lignesALivrer = repartition.filter((r) => r.aLivrer > 0);
+    const lignesARemonter = repartition.filter((r) => r.aRemonter > 0);
+
+    let blGenere = null;
+    if (lignesALivrer.length > 0) {
+      const lignesBl = [];
+      for (const { ligne, aLivrer } of lignesALivrer) {
+        const { lotsChoisis } = await selectionnerLotFEFO(ligne.produitId, etablissementId, aLivrer);
+        for (const lotChoisi of lotsChoisis) {
+          lignesBl.push({ produitId: ligne.produitId, lotId: lotChoisi.lotId, quantiteEnvoyee: lotChoisi.quantite });
+        }
+      }
+      blGenere = await prisma.bordereauLivraison.create({
+        data: {
+          requisitionId: requisitionAJour.id,
+          etablissementExpediteurId: etablissementId,
+          etablissementDestinataireId: requisitionAJour.etablissementDemandeurId,
+          statut: "ENVOYE",
+          lignes: { create: lignesBl },
+        },
+        include: { lignes: true },
+      });
+      for (const lb of lignesBl) {
+        await prisma.lot.update({ where: { id: lb.lotId }, data: { quantite: { decrement: lb.quantiteEnvoyee } } });
+        await prisma.mouvementStock.create({
+          data: {
+            lotId: lb.lotId,
+            type: "SORTIE",
+            quantite: lb.quantiteEnvoyee,
+            referenceType: "BL",
+            referenceId: blGenere.id,
+            utilisateurId: req.utilisateur.utilisateurId,
+          },
+        });
+      }
+      // Décrémente aussi le total agrégé du stock de l'expéditeur.
+      for (const { ligne, aLivrer } of lignesALivrer) {
+        await prisma.stock.update({
+          where: { produitId_etablissementId: { produitId: ligne.produitId, etablissementId } },
+          data: { quantiteTotale: { decrement: aLivrer } },
+        });
+      }
+    }
+
+    if (lignesARemonter.length === 0) {
+      const misAJour = await prisma.requisition.update({
+        where: { id },
+        data: { statut: "CLOTUREE" },
+      });
+      return res.json({ requisition: misAJour, bordereauLivraison: blGenere, livreeDirectement: true });
+    }
+
     const indexActuel = ORDRE_CIRCUIT.indexOf(etabActuel.type);
     const typeSuivant = ORDRE_CIRCUIT[indexActuel + 1];
 
     if (!typeSuivant) {
-      // Dernier niveau (CAMEC) : la réquisition est prête pour distribution.
-      const misAJour = await prisma.requisition.update({
-        where: { id },
-        data: { statut: "VALIDEE" },
-      });
-      return res.json(misAJour);
+      await Promise.all(
+        lignesARemonter.map(({ ligne, aRemonter }) =>
+          prisma.requisitionLigne.update({ where: { id: ligne.id }, data: { quantiteValidee: aRemonter } })
+        )
+      );
+      const misAJour = await prisma.requisition.update({ where: { id }, data: { statut: "VALIDEE" } });
+      return res.json({ requisition: misAJour, bordereauLivraison: blGenere, livreeDirectement: lignesALivrer.length > 0 });
     }
 
     const niveauSuivant = await prisma.etablissement.findFirst({
@@ -145,11 +218,37 @@ async function traiterDecision(req, res) {
       },
     });
 
+    if (lignesALivrer.length === 0) {
+      const misAJour = await prisma.requisition.update({
+        where: { id },
+        data: { statut: "EN_ATTENTE", niveauActuelId: niveauSuivant.id },
+      });
+      return res.json({ requisition: misAJour, bordereauLivraison: null, livreeDirectement: false });
+    }
+
+    const requisitionFille = await prisma.requisition.create({
+      data: {
+        etablissementDemandeurId: requisitionAJour.etablissementDemandeurId,
+        niveauActuelId: niveauSuivant.id,
+        statut: "EN_ATTENTE",
+        justification: requisitionAJour.justification,
+        requisitionParentId: requisitionAJour.id,
+        lignes: {
+          create: lignesARemonter.map(({ ligne, aRemonter }) => ({
+            produitId: ligne.produitId,
+            quantiteDemandee: aRemonter,
+            quantiteValidee: aRemonter,
+          })),
+        },
+      },
+    });
+
     const misAJour = await prisma.requisition.update({
       where: { id },
-      data: { statut: "EN_ATTENTE", niveauActuelId: niveauSuivant.id },
+      data: { statut: "SCINDEE" },
     });
-    return res.json(misAJour);
+
+    return res.json({ requisition: misAJour, requisitionFille, bordereauLivraison: blGenere, livreeDirectement: true, partiel: true });
   }
 
   return res.status(400).json({ erreur: "Décision non reconnue." });
