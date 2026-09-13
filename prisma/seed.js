@@ -99,6 +99,19 @@ async function main() {
     },
   });
 
+  console.log("Création du GAS Programme national (Autre)...");
+  await prisma.etablissement.upsert({
+    where: { id: "gas-programme-national-autre" },
+    update: {},
+    create: {
+      id: "gas-programme-national-autre",
+      nom: "GAS Programme national - Autre",
+      type: "GAS_PROGRAMME_NATIONAL",
+      aStockPhysique: false,
+      programmeId: "programme-autre",
+    },
+  });
+
   console.log("Création du GAS DRS Nouakchott...");
   const gasDrsNouakchott = await prisma.etablissement.upsert({
     where: { id: "gas-drs-nouakchott" },
@@ -329,6 +342,18 @@ async function main() {
     create: { utilisateurId: utilisateurProgNat.id, etablissementId: "gas-programme-national", role: "GAS_PROGRAMME_NATIONAL" },
   });
 
+  console.log("Création d'un compte de démonstration pour le GAS Programme national (Autre)...");
+  const utilisateurProgAutre = await prisma.utilisateur.upsert({
+    where: { identifiant: "gas.programme.autre" },
+    update: {},
+    create: { nomComplet: "Agent GAS Programme National - Autre", identifiant: "gas.programme.autre", motDePasseHash: motDePasseDemo },
+  });
+  await prisma.userEtablissement.upsert({
+    where: { utilisateurId_etablissementId: { utilisateurId: utilisateurProgAutre.id, etablissementId: "gas-programme-national-autre" } },
+    update: {},
+    create: { utilisateurId: utilisateurProgAutre.id, etablissementId: "gas-programme-national-autre", role: "GAS_PROGRAMME_NATIONAL" },
+  });
+
   console.log("\nSeed terminé. Comptes disponibles :");
   console.log("  - admin / ChangeMoiRapidement123 (Admin système, indépendant de tout établissement)");
   console.log("  - gestionnaire.camec / Camec123456 (Gestionnaire CAMEC, CAMEC central)");
@@ -336,6 +361,7 @@ async function main() {
   console.log("  - gas.drs.nouakchott / Demo123456 (Gestionnaire DRS, GAS DRS Nouakchott Nord)");
   console.log("  - gas.moughataa.arafat / Demo123456 (GAS Moughataa, Arafat)");
   console.log("  - gas.programme.national / Demo123456 (GAS Programme national, SIDA/Hépatite)");
+  console.log("  - gas.programme.autre / Demo123456 (GAS Programme national, Autre)");
   console.log("Change ces mots de passe avant tout usage réel.");
 }
 

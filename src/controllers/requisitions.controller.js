@@ -1,8 +1,6 @@
 const prisma = require("../config/prisma");
 const { selectionnerLotFEFO } = require("./stocks.controller");
 
-// Ordre obligatoire du circuit, du plus bas au plus haut niveau.
-// Utilisé pour déterminer le prochain niveau et empêcher tout court-circuit.
 const ORDRE_CIRCUIT = [
   "FORMATION_SANITAIRE",
   "GAS_MOUGHATAA",
@@ -11,10 +9,6 @@ const ORDRE_CIRCUIT = [
   "CAMEC",
 ];
 
-// POST /requisitions
-// Body : { lignes: [{ produitId, quantiteDemandee }], justification }
-// Créée par une formation sanitaire, envoyée automatiquement au niveau
-// juste au-dessus dans le circuit (GAS Moughataa).
 async function creerRequisition(req, res) {
   const { etablissementId, role } = req.utilisateur;
   const { lignes, justification } = req.body;
@@ -59,8 +53,6 @@ async function creerRequisition(req, res) {
   return res.status(201).json(requisition);
 }
 
-// GET /requisitions/a-valider
-// Retourne les réquisitions actuellement à ce niveau, en attente de décision.
 async function listerAValider(req, res) {
   const { etablissementId } = req.utilisateur;
   const requisitions = await prisma.requisition.findMany({
@@ -71,8 +63,6 @@ async function listerAValider(req, res) {
   return res.json(requisitions);
 }
 
-// POST /requisitions/:id/decision
-// Body : { decision: "valider" | "modifier" | "rejeter", lignes?: [{ requisitionLigneId, quantiteValidee }] }
 async function traiterDecision(req, res) {
   const { etablissementId, role } = req.utilisateur;
   const { id } = req.params;
@@ -84,10 +74,7 @@ async function traiterDecision(req, res) {
   }
 
   if (decision === "rejeter") {
-    const misAJour = await prisma.requisition.update({
-      where: { id },
-      data: { statut: "REJETEE" },
-    });
+    const misAJour = await prisma.requisition.update({ where: { id }, data: { statut: "REJETEE" } });
     return res.json(misAJour);
   }
 
@@ -115,7 +102,6 @@ async function traiterDecision(req, res) {
   }
 
   if (decision === "valider") {
-    // Applique d'abord les quantités validées transmises par le formulaire.
     if (Array.isArray(lignes)) {
       await Promise.all(
         lignes.map((l) =>
@@ -129,12 +115,11 @@ async function traiterDecision(req, res) {
 
     const requisitionAJour = await prisma.requisition.findUnique({
       where: { id },
-      include: { lignes: true },
+      include: { lignes: { include: { produit: true } } },
     });
 
     const etabActuel = await prisma.etablissement.findUnique({ where: { id: etablissementId } });
 
-    // Pour chaque ligne, détermine ce qui peut être livré directement depuis le stock de ce niveau.
     const repartition = [];
     for (const ligne of requisitionAJour.lignes) {
       const stock = await prisma.stock.findUnique({
@@ -181,7 +166,6 @@ async function traiterDecision(req, res) {
           },
         });
       }
-      // Décrémente aussi le total agrégé du stock de l'expéditeur.
       for (const { ligne, aLivrer } of lignesALivrer) {
         await prisma.stock.update({
           where: { produitId_etablissementId: { produitId: ligne.produitId, etablissementId } },
@@ -191,10 +175,7 @@ async function traiterDecision(req, res) {
     }
 
     if (lignesARemonter.length === 0) {
-      const misAJour = await prisma.requisition.update({
-        where: { id },
-        data: { statut: "CLOTUREE" },
-      });
+      const misAJour = await prisma.requisition.update({ where: { id }, data: { statut: "CLOTUREE" } });
       return res.json({ requisition: misAJour, bordereauLivraison: blGenere, livreeDirectement: true });
     }
 
@@ -211,44 +192,72 @@ async function traiterDecision(req, res) {
       return res.json({ requisition: misAJour, bordereauLivraison: blGenere, livreeDirectement: lignesALivrer.length > 0 });
     }
 
-    const niveauSuivant = await prisma.etablissement.findFirst({
-      where: {
-        type: typeSuivant,
-        ...(typeSuivant === "GAS_DRS" ? { drsId: etabActuel.drsId } : {}),
-      },
-    });
+    // Regroupe les lignes à remonter par établissement destinataire. Au niveau
+    // GAS Programme national, le regroupement se fait par programme (chaque
+    // produit appartient à un programme, et chaque GAS Programme national ne
+    // gère qu'un seul programme) — pas juste "le premier trouvé".
+    const groupes = new Map();
+    if (typeSuivant === "GAS_PROGRAMME_NATIONAL") {
+      for (const { ligne, aRemonter } of lignesARemonter) {
+        const programmeId = ligne.produit.programmeId;
+        const etabDest = await prisma.etablissement.findFirst({
+          where: { type: "GAS_PROGRAMME_NATIONAL", programmeId },
+        });
+        if (!etabDest) {
+          return res.status(500).json({ erreur: `Aucun GAS Programme national trouvé pour le programme de ${ligne.produit.nom}.` });
+        }
+        if (!groupes.has(etabDest.id)) groupes.set(etabDest.id, { etablissement: etabDest, items: [] });
+        groupes.get(etabDest.id).items.push({ ligne, aRemonter });
+      }
+    } else {
+      const niveauSuivant = await prisma.etablissement.findFirst({
+        where: {
+          type: typeSuivant,
+          ...(typeSuivant === "GAS_DRS" ? { drsId: etabActuel.drsId } : {}),
+        },
+      });
+      groupes.set(niveauSuivant.id, { etablissement: niveauSuivant, items: lignesARemonter });
+    }
 
-    if (lignesALivrer.length === 0) {
+    if (lignesALivrer.length === 0 && groupes.size === 1) {
+      const [seulGroupe] = Array.from(groupes.values());
       const misAJour = await prisma.requisition.update({
         where: { id },
-        data: { statut: "EN_ATTENTE", niveauActuelId: niveauSuivant.id },
+        data: { statut: "EN_ATTENTE", niveauActuelId: seulGroupe.etablissement.id },
       });
       return res.json({ requisition: misAJour, bordereauLivraison: null, livreeDirectement: false });
     }
 
-    const requisitionFille = await prisma.requisition.create({
-      data: {
-        etablissementDemandeurId: requisitionAJour.etablissementDemandeurId,
-        niveauActuelId: niveauSuivant.id,
-        statut: "EN_ATTENTE",
-        justification: requisitionAJour.justification,
-        requisitionParentId: requisitionAJour.id,
-        lignes: {
-          create: lignesARemonter.map(({ ligne, aRemonter }) => ({
-            produitId: ligne.produitId,
-            quantiteDemandee: aRemonter,
-            quantiteValidee: aRemonter,
-          })),
+    const requisitionsFilles = [];
+    for (const { etablissement, items } of groupes.values()) {
+      const fille = await prisma.requisition.create({
+        data: {
+          etablissementDemandeurId: requisitionAJour.etablissementDemandeurId,
+          niveauActuelId: etablissement.id,
+          statut: "EN_ATTENTE",
+          justification: requisitionAJour.justification,
+          requisitionParentId: requisitionAJour.id,
+          lignes: {
+            create: items.map(({ ligne, aRemonter }) => ({
+              produitId: ligne.produitId,
+              quantiteDemandee: aRemonter,
+              quantiteValidee: aRemonter,
+            })),
+          },
         },
-      },
-    });
+      });
+      requisitionsFilles.push(fille);
+    }
 
-    const misAJour = await prisma.requisition.update({
-      where: { id },
-      data: { statut: "SCINDEE" },
-    });
+    const misAJour = await prisma.requisition.update({ where: { id }, data: { statut: "SCINDEE" } });
 
-    return res.json({ requisition: misAJour, requisitionFille, bordereauLivraison: blGenere, livreeDirectement: true, partiel: true });
+    return res.json({
+      requisition: misAJour,
+      requisitionsFilles,
+      bordereauLivraison: blGenere,
+      livreeDirectement: lignesALivrer.length > 0,
+      partiel: lignesALivrer.length > 0,
+    });
   }
 
   return res.status(400).json({ erreur: "Décision non reconnue." });
