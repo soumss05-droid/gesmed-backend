@@ -10,6 +10,7 @@ const ecartsRoutes = require("./routes/ecarts.routes");
 const rapportsRoutes = require("./routes/rapports.routes");
 const produitsRoutes = require("./routes/produits.routes");
 const adminRoutes = require("./routes/admin.routes");
+const receptionsRoutes = require("./routes/receptions.routes");
 
 const app = express();
 
@@ -26,6 +27,7 @@ app.use("/ecarts", ecartsRoutes);
 app.use("/rapports", rapportsRoutes);
 app.use("/produits", produitsRoutes);
 app.use("/admin", adminRoutes);
+app.use("/receptions", receptionsRoutes);
 
 // Gestion simple des erreurs non prévues.
 app.use((err, req, res, next) => {
