@@ -106,7 +106,7 @@ async function main() {
     create: { id: "gas-drs-nouakchott", nom: "GAS DRS Nouakchott Nord", type: "GAS_DRS", aStockPhysique: true, drsId: drsNouakchott.id },
   });
 
-    console.log("Création de la Moughataa d'Arafat...");
+  console.log("Création de la Moughataa d'Arafat...");
   const moughataaArafat = await prisma.moughataa.upsert({
     where: { id: "moughataa-arafat" },
     update: {},
@@ -126,7 +126,7 @@ async function main() {
       moughataaId: moughataaArafat.id,
     },
   });
-  
+
   console.log("Création de la formation sanitaire CS Arafat 2...");
   const csArafat2 = await prisma.etablissement.upsert({
     where: { id: "cs-arafat-2" },
@@ -193,7 +193,7 @@ async function main() {
     create: { produitId: "prod-ampicilline", etablissementId: csArafat2.id, quantiteTotale: 86, seuilMin: 30, seuilMax: 150, statut: "NORMAL" },
   });
 
-    console.log("Création des lots et stocks de démonstration pour le GAS Moughataa d'Arafat...");
+  console.log("Création des lots et stocks de démonstration pour le GAS Moughataa d'Arafat...");
   await prisma.lot.upsert({
     where: { id: "lot-moughataa-amoxicilline-1" },
     update: {},
@@ -232,7 +232,7 @@ async function main() {
     update: {},
     create: { produitId: "prod-ampicilline", etablissementId: gasMoughataaArafat.id, quantiteTotale: 0, seuilMin: 30, seuilMax: 150, statut: "RUPTURE" },
   });
-  
+
   console.log("Création du stock central à la CAMEC (pour permettre les futures expéditions)...");
   for (const produit of PRODUITS) {
     await prisma.lot.upsert({

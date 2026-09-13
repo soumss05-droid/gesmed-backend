@@ -207,8 +207,8 @@ enum ReferenceType {
   REQUISITION
   BL
   MANUEL
+  DISPENSATION
 }
-
 model MouvementStock {
   id             String         @id @default(uuid())
   lotId          String         @map("lot_id")
