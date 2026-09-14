@@ -63,6 +63,49 @@ async function listerAValider(req, res) {
   return res.json(requisitions);
 }
 
+// Détermine l'établissement qui a envoyé la réquisition au niveau actuel,
+// pour que toute modification de quantités lui soit renvoyée en confirmation
+// avant de continuer le circuit. Le chemin est déterministe : il dépend
+// uniquement de la localisation de la formation sanitaire demandeuse
+// d'origine (moughataaId, drsId), sauf pour le dernier maillon
+// (GAS Programme national) où il dépend du programme des produits — stable
+// à ce stade puisqu'une réquisition ne porte plus qu'un seul programme une
+// fois passée la scission au niveau du GAS DRS.
+async function trouverEtablissementPrecedent(etabActuel, requisitionAJour) {
+  const indexActuel = ORDRE_CIRCUIT.indexOf(etabActuel.type);
+  const typePrecedent = ORDRE_CIRCUIT[indexActuel - 1];
+  if (!typePrecedent) return null;
+
+  if (typePrecedent === "FORMATION_SANITAIRE") {
+    return prisma.etablissement.findUnique({ where: { id: requisitionAJour.etablissementDemandeurId } });
+  }
+
+  const demandeur = await prisma.etablissement.findUnique({
+    where: { id: requisitionAJour.etablissementDemandeurId },
+  });
+
+  if (typePrecedent === "GAS_MOUGHATAA") {
+    return prisma.etablissement.findFirst({
+      where: { type: "GAS_MOUGHATAA", moughataaId: demandeur.moughataaId },
+    });
+  }
+
+  if (typePrecedent === "GAS_DRS") {
+    return prisma.etablissement.findFirst({
+      where: { type: "GAS_DRS", drsId: demandeur.drsId },
+    });
+  }
+
+  if (typePrecedent === "GAS_PROGRAMME_NATIONAL") {
+    const programmeId = requisitionAJour.lignes[0]?.produit?.programmeId;
+    return prisma.etablissement.findFirst({
+      where: { type: "GAS_PROGRAMME_NATIONAL", programmeId },
+    });
+  }
+
+  return null;
+}
+
 async function traiterDecision(req, res) {
   const { etablissementId, role } = req.utilisateur;
   const { id } = req.params;
@@ -88,17 +131,24 @@ async function traiterDecision(req, res) {
       )
     );
 
-    if (role === "GAS_PROGRAMME_NATIONAL") {
-      const etabActuel = await prisma.etablissement.findUnique({ where: { id: etablissementId } });
-      const gasDrs = await prisma.etablissement.findFirst({
-        where: { type: "GAS_DRS", drsId: etabActuel.drsId },
+    const requisitionAJour = await prisma.requisition.findUnique({
+      where: { id },
+      include: { lignes: { include: { produit: true } } },
+    });
+    const etabActuel = await prisma.etablissement.findUnique({ where: { id: etablissementId } });
+    const etablissementPrecedent = await trouverEtablissementPrecedent(etabActuel, requisitionAJour);
+
+    if (!etablissementPrecedent) {
+      return res.status(500).json({
+        erreur: "Impossible de déterminer le niveau précédent pour confirmer cette modification.",
       });
-      const misAJour = await prisma.requisition.update({
-        where: { id },
-        data: { statut: "MODIFIEE_EN_ATTENTE_CONFIRMATION", niveauActuelId: gasDrs.id },
-      });
-      return res.json(misAJour);
     }
+
+    const misAJour = await prisma.requisition.update({
+      where: { id },
+      data: { statut: "MODIFIEE_EN_ATTENTE_CONFIRMATION", niveauActuelId: etablissementPrecedent.id },
+    });
+    return res.json(misAJour);
   }
 
   if (decision === "valider") {

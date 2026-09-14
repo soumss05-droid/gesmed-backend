@@ -285,4 +285,164 @@ async function calculerCmm(req, res) {
   return res.json(resultat);
 }
 
-module.exports = { listerStocks, calculerStatut, selectionnerLotFEFO, stockReseau, entreeStock, enregistrerDispensation, calculerCmm };
+// ---------------------------------------------------------------------------
+// Commande suggérée par niveau : CMM propre à chaque échelon + stock
+// disponible cumulé sur son territoire réel (pas juste son dépôt).
+//
+// CMM :
+//  - Formation sanitaire : dispensation réelle aux patients (SORTIE/DISPENSATION)
+//  - GAS Moughataa, GAS DRS, CAMEC : leur propre distribution vers le niveau
+//    juste en dessous (SORTIE/BL sortant de leurs propres lots)
+//
+// Stock disponible :
+//  - Formation sanitaire : son stock physique propre
+//  - GAS Moughataa : son stock physique + celui de ses formations sanitaires
+//  - GAS DRS : son stock physique + stock cumulé de chaque Moughataa
+//    (dépôt + ses FS)
+//  - CAMEC : son stock physique + stock cumulé de chaque région (DRS)
+//
+// Quantité suggérée = (N × CMM) − stock disponible, jamais négative.
+// N = 1 (formation sanitaire), 3 (GAS Moughataa), 6 (GAS DRS).
+// ---------------------------------------------------------------------------
+
+const N_MOIS_CIBLE = {
+  FORMATION_SANITAIRE: 1,
+  GAS_MOUGHATAA: 3,
+  GAS_DRS: 6,
+};
+
+async function stockPhysiqueParProduit(etablissementId) {
+  const stocks = await prisma.stock.findMany({ where: { etablissementId } });
+  const map = {};
+  for (const s of stocks) map[s.produitId] = s.quantiteTotale;
+  return map;
+}
+
+function fusionner(cible, source) {
+  for (const [produitId, quantite] of Object.entries(source)) {
+    cible[produitId] = (cible[produitId] || 0) + quantite;
+  }
+  return cible;
+}
+
+// Stock disponible cumulé sur tout le territoire réel de l'établissement
+// (récursif : un GAS DRS cumule le stock physique de chaque Moughataa, qui
+// lui-même cumule déjà le stock physique de ses formations sanitaires).
+async function stockDisponibleCumule(etablissement) {
+  const total = await stockPhysiqueParProduit(etablissement.id);
+
+  if (etablissement.type === "GAS_MOUGHATAA") {
+    const formationsSanitaires = await prisma.etablissement.findMany({
+      where: { type: "FORMATION_SANITAIRE", moughataaId: etablissement.moughataaId },
+    });
+    for (const fs of formationsSanitaires) {
+      fusionner(total, await stockPhysiqueParProduit(fs.id));
+    }
+  }
+
+  if (etablissement.type === "GAS_DRS") {
+    const moughataas = await prisma.etablissement.findMany({
+      where: { type: "GAS_MOUGHATAA", drsId: etablissement.drsId },
+    });
+    for (const m of moughataas) {
+      fusionner(total, await stockDisponibleCumule(m));
+    }
+  }
+
+  if (etablissement.type === "CAMEC") {
+    const drsListe = await prisma.drs.findMany();
+    for (const drs of drsListe) {
+      const etabDrs = await prisma.etablissement.findFirst({ where: { type: "GAS_DRS", drsId: drs.id } });
+      if (etabDrs) fusionner(total, await stockDisponibleCumule(etabDrs));
+    }
+  }
+
+  return total;
+}
+
+// CMM par produit, basé sur les sorties réelles de l'établissement lui-même
+// (dispensation pour une formation sanitaire, distribution/BL pour les autres).
+async function cmmParProduit(etablissementId, referenceType) {
+  const ilYA6Mois = new Date();
+  ilYA6Mois.setMonth(ilYA6Mois.getMonth() - 6);
+
+  const mouvements = await prisma.mouvementStock.findMany({
+    where: {
+      type: "SORTIE",
+      referenceType,
+      dateMouvement: { gte: ilYA6Mois },
+      lot: { etablissementId },
+    },
+    include: { lot: true },
+  });
+
+  const totalParProduit = {};
+  for (const m of mouvements) {
+    totalParProduit[m.lot.produitId] = (totalParProduit[m.lot.produitId] || 0) + m.quantite;
+  }
+
+  const cmm = {};
+  for (const [produitId, total] of Object.entries(totalParProduit)) {
+    cmm[produitId] = Math.round((total / 6) * 100) / 100;
+  }
+  return cmm;
+}
+
+// Calcule, pour un établissement donné, le CMM, le stock disponible cumulé
+// et la quantité suggérée à commander, produit par produit.
+async function calculerCommandeSuggereePourEtablissement(etablissementId) {
+  const etablissement = await prisma.etablissement.findUnique({ where: { id: etablissementId } });
+  if (!etablissement) throw new Error("Établissement introuvable.");
+
+  const referenceType = etablissement.type === "FORMATION_SANITAIRE" ? "DISPENSATION" : "BL";
+  const [cmm, disponible] = await Promise.all([
+    cmmParProduit(etablissementId, referenceType),
+    stockDisponibleCumule(etablissement),
+  ]);
+
+  const n = N_MOIS_CIBLE[etablissement.type] || 0;
+  const produits = await prisma.produit.findMany();
+
+  return produits.map((p) => {
+    const cmmProduit = cmm[p.id] || 0;
+    const stockDisponible = disponible[p.id] || 0;
+    const cible = n * cmmProduit;
+    const quantiteSuggeree = Math.max(0, Math.round(cible - stockDisponible));
+    return {
+      produitId: p.id,
+      produit: p.nom,
+      cmm: cmmProduit,
+      stockDisponible,
+      quantiteSuggeree,
+    };
+  });
+}
+
+// GET /stocks/commande-suggeree
+async function commandeSuggeree(req, res) {
+  const { etablissementId, role } = req.utilisateur;
+
+  if (!["FORMATION_SANITAIRE", "GAS_MOUGHATAA", "GESTIONNAIRE_DRS", "GESTIONNAIRE_CAMEC", "ADMIN"].includes(role)) {
+    return res.status(403).json({ erreur: "La commande suggérée n'est pas disponible pour ton rôle." });
+  }
+
+  try {
+    const resultat = await calculerCommandeSuggereePourEtablissement(etablissementId);
+    return res.json(resultat);
+  } catch (erreur) {
+    console.error("Erreur lors du calcul de la commande suggérée :", erreur);
+    return res.status(500).json({ erreur: "Erreur serveur lors du calcul de la commande suggérée." });
+  }
+}
+
+module.exports = {
+  listerStocks,
+  calculerStatut,
+  selectionnerLotFEFO,
+  stockReseau,
+  entreeStock,
+  enregistrerDispensation,
+  calculerCmm,
+  calculerCommandeSuggereePourEtablissement,
+  commandeSuggeree,
+};
