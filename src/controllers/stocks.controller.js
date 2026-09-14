@@ -31,6 +31,7 @@ async function listerStocks(req, res) {
         seuilMax: stock.seuilMax,
         statut: stock.statut,
         lots: lots.map((l) => ({
+          id: l.id,
           numeroLot: l.numeroLot,
           datePeremption: l.datePeremption,
           quantite: l.quantite,
