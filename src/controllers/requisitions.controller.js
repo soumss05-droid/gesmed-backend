@@ -1,5 +1,5 @@
 const prisma = require("../config/prisma");
-const { selectionnerLotFEFO } = require("./stocks.controller");
+const { selectionnerLotFEFO, calculerCommandeSuggereePourEtablissement } = require("./stocks.controller");
 
 const ORDRE_CIRCUIT = [
   "FORMATION_SANITAIRE",
@@ -310,7 +310,119 @@ async function traiterDecision(req, res) {
     });
   }
 
-  return res.status(400).json({ erreur: "Décision non reconnue." });
+// POST /requisitions/reapprovisionnement
+// Permet au GAS Moughataa et au GAS DRS de passer leur propre commande de
+// réapprovisionnement, indépendamment de toute réquisition précise venant
+// d'en dessous — basée sur leur CMM propre et leur stock disponible cumulé
+// (voir calculerCommandeSuggereePourEtablissement). Réutilise le même
+// circuit d'escalade que les réquisitions classiques : le GAS Moughataa
+// commande à son GAS DRS, le GAS DRS commande au(x) GAS Programme national
+// concerné(s) (scindé par programme si plusieurs sont touchés).
+async function creerCommandeReapprovisionnement(req, res) {
+  const { etablissementId, role } = req.utilisateur;
+  const { lignes, justification } = req.body; // lignes optionnelles pour ajuster manuellement la suggestion
+
+  if (!["GAS_MOUGHATAA", "GESTIONNAIRE_DRS"].includes(role)) {
+    return res.status(403).json({
+      erreur: "Seuls le GAS Moughataa et le GAS DRS peuvent passer une commande de réapprovisionnement.",
+    });
+  }
+
+  const etablissement = await prisma.etablissement.findUnique({ where: { id: etablissementId } });
+
+  let lignesACommander;
+  if (Array.isArray(lignes) && lignes.length > 0) {
+    lignesACommander = lignes.map((l) => ({ produitId: l.produitId, quantite: Number(l.quantite) }));
+  } else {
+    const suggestions = await calculerCommandeSuggereePourEtablissement(etablissementId);
+    lignesACommander = suggestions
+      .filter((s) => s.quantiteSuggeree > 0)
+      .map((s) => ({ produitId: s.produitId, quantite: s.quantiteSuggeree }));
+  }
+
+  if (lignesACommander.length === 0) {
+    return res.status(400).json({
+      erreur: "Aucun produit à commander (aucun besoin détecté, ou aucune ligne fournie).",
+    });
+  }
+
+  if (etablissement.type === "GAS_MOUGHATAA") {
+    const gasDrs = await prisma.etablissement.findFirst({
+      where: { type: "GAS_DRS", drsId: etablissement.drsId },
+    });
+    if (!gasDrs) {
+      return res.status(500).json({ erreur: "Aucun GAS DRS trouvé pour ce Moughataa." });
+    }
+
+    const requisition = await prisma.requisition.create({
+      data: {
+        etablissementDemandeurId: etablissementId,
+        niveauActuelId: gasDrs.id,
+        statut: "EN_ATTENTE",
+        justification: justification || "Commande de réapprovisionnement (GAS Moughataa)",
+        lignes: {
+          create: lignesACommander.map((l) => ({
+            produitId: l.produitId,
+            quantiteDemandee: l.quantite,
+            quantiteValidee: l.quantite,
+          })),
+        },
+      },
+      include: { lignes: true },
+    });
+
+    return res.status(201).json({ requisitions: [requisition] });
+  }
+
+  if (etablissement.type !== "GAS_DRS") {
+    return res.status(500).json({ erreur: "Établissement incohérent pour ce rôle." });
+  }
+
+  // GAS DRS : regroupe les lignes par programme (comme la scission déjà en
+  // place), puisqu'il n'existe pas un seul GAS Programme national mais un
+  // par programme.
+  const produitsInfo = await prisma.produit.findMany({
+    where: { id: { in: lignesACommander.map((l) => l.produitId) } },
+  });
+  const produitParId = new Map(produitsInfo.map((p) => [p.id, p]));
+
+  const groupes = new Map();
+  for (const ligne of lignesACommander) {
+    const produit = produitParId.get(ligne.produitId);
+    const etabDest = await prisma.etablissement.findFirst({
+      where: { type: "GAS_PROGRAMME_NATIONAL", programmeId: produit.programmeId },
+    });
+    if (!etabDest) {
+      return res.status(500).json({
+        erreur: `Aucun GAS Programme national trouvé pour le programme de ${produit.nom}.`,
+      });
+    }
+    if (!groupes.has(etabDest.id)) groupes.set(etabDest.id, { etablissement: etabDest, items: [] });
+    groupes.get(etabDest.id).items.push(ligne);
+  }
+
+  const requisitionsCreees = [];
+  for (const { etablissement: etabDest, items } of groupes.values()) {
+    const requisition = await prisma.requisition.create({
+      data: {
+        etablissementDemandeurId: etablissementId,
+        niveauActuelId: etabDest.id,
+        statut: "EN_ATTENTE",
+        justification: justification || "Commande de réapprovisionnement (GAS DRS)",
+        lignes: {
+          create: items.map((l) => ({
+            produitId: l.produitId,
+            quantiteDemandee: l.quantite,
+            quantiteValidee: l.quantite,
+          })),
+        },
+      },
+      include: { lignes: true },
+    });
+    requisitionsCreees.push(requisition);
+  }
+
+  return res.status(201).json({ requisitions: requisitionsCreees });
 }
 
-module.exports = { creerRequisition, listerAValider, traiterDecision };
+module.exports = { creerRequisition, listerAValider, traiterDecision, creerCommandeReapprovisionnement };
