@@ -74,6 +74,7 @@ model Etablissement {
   blExpedies                  BordereauLivraison[] @relation("BlExpediteur")
   blRecus                     BordereauLivraison[] @relation("BlDestinataire")
   inventaires                 InventairePhysique[]
+  notifications                Notification[]
 
   @@map("etablissements")
 }
@@ -142,6 +143,7 @@ model Produit {
   stocks           Stock[]
   requisitionLignes RequisitionLigne[]
   blLignes         BlLigne[]
+  notifications    Notification[]
 
   @@map("produits")
 }
@@ -230,6 +232,7 @@ enum StatutRequisition {
   BROUILLON
   EN_ATTENTE
   MODIFIEE_EN_ATTENTE_CONFIRMATION
+  REJETEE_POUR_CORRECTION
   VALIDEE
   REJETEE
   EXPEDIEE
@@ -254,6 +257,7 @@ model Requisition {
 
   lignes                 RequisitionLigne[]
   bordereaux             BordereauLivraison[]
+  notifications          Notification[]
 
   @@map("requisitions")
 }
@@ -354,4 +358,33 @@ model LigneInventaire {
   ecart            Int
 
   @@map("lignes_inventaire")
+}
+
+// ============================================================
+// 6. Notifications (informer les établissements des décisions prises
+//    sur leurs réquisitions, sans bloquer le circuit)
+// ============================================================
+
+enum TypeNotification {
+  VALIDEE
+  MODIFIEE
+  SCINDEE
+  REJETEE_POUR_CORRECTION
+  RUPTURE_STOCK
+}
+
+model Notification {
+  id              String            @id @default(uuid())
+  etablissementId String            @map("etablissement_id")
+  etablissement   Etablissement     @relation(fields: [etablissementId], references: [id])
+  type            TypeNotification
+  message         String
+  requisitionId   String?           @map("requisition_id")
+  requisition     Requisition?      @relation(fields: [requisitionId], references: [id])
+  produitId       String?           @map("produit_id")
+  produit         Produit?          @relation(fields: [produitId], references: [id])
+  lue             Boolean           @default(false)
+  createdAt       DateTime          @default(now()) @map("created_at")
+
+  @@map("notifications")
 }

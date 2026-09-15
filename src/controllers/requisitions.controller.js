@@ -56,18 +56,21 @@ async function creerRequisition(req, res) {
 async function listerAValider(req, res) {
   const { etablissementId } = req.utilisateur;
   const requisitions = await prisma.requisition.findMany({
-    where: { niveauActuelId: etablissementId, statut: { in: ["EN_ATTENTE", "MODIFIEE_EN_ATTENTE_CONFIRMATION"] } },
+    where: {
+      niveauActuelId: etablissementId,
+      statut: { in: ["EN_ATTENTE", "REJETEE_POUR_CORRECTION"] },
+    },
     include: { lignes: { include: { produit: true } }, etablissementDemandeur: true },
     orderBy: { dateCreation: "asc" },
   });
   return res.json(requisitions);
 }
 
-// Détermine l'établissement qui a envoyé la réquisition au niveau actuel,
-// pour que toute modification de quantités lui soit renvoyée en confirmation
-// avant de continuer le circuit. Le chemin est déterministe : il dépend
-// uniquement de la localisation de la formation sanitaire demandeuse
-// d'origine (moughataaId, drsId), sauf pour le dernier maillon
+// Détermine l'établissement qui a envoyé la réquisition au niveau actuel —
+// utilisé pour notifier ce niveau du résultat (validée/modifiée/scindée),
+// et pour renvoyer la réquisition en correction en cas de rejet. Le chemin
+// est déterministe : il dépend de la localisation de la formation sanitaire
+// demandeuse d'origine (moughataaId, drsId), sauf pour le dernier maillon
 // (GAS Programme national) où il dépend du programme des produits — stable
 // à ce stade puisqu'une réquisition ne porte plus qu'un seul programme une
 // fois passée la scission au niveau du GAS DRS.
@@ -106,8 +109,23 @@ async function trouverEtablissementPrecedent(etabActuel, requisitionAJour) {
   return null;
 }
 
+// Enregistre une notification pour un établissement. N'importe quel
+// utilisateur rattaché à cet établissement pourra la consulter — ce n'est
+// jamais bloquant pour le circuit lui-même.
+async function creerNotification({ etablissementId, type, message, requisitionId = null, produitId = null }) {
+  try {
+    await prisma.notification.create({
+      data: { etablissementId, type, message, requisitionId, produitId },
+    });
+  } catch (erreur) {
+    // Une notification manquée ne doit jamais faire échouer le circuit
+    // métier — on journalise seulement.
+    console.error("Erreur lors de la création d'une notification :", erreur);
+  }
+}
+
 async function traiterDecision(req, res) {
-  const { etablissementId, role } = req.utilisateur;
+  const { etablissementId, role, utilisateurId } = req.utilisateur;
   const { id } = req.params;
   const { decision, lignes } = req.body;
 
@@ -116,42 +134,55 @@ async function traiterDecision(req, res) {
     return res.status(404).json({ erreur: "Réquisition introuvable à ce niveau." });
   }
 
+  const etabActuel = await prisma.etablissement.findUnique({ where: { id: etablissementId } });
+
+  // ---------------------------------------------------------------------
+  // REJETER — réservé au GAS Programme national. Retourne la réquisition
+  // au GAS DRS qui l'a envoyée, pour correction. Pas de délai automatique :
+  // elle reste à ce statut jusqu'à ce que le GAS DRS agisse.
+  // ---------------------------------------------------------------------
   if (decision === "rejeter") {
-    const misAJour = await prisma.requisition.update({ where: { id }, data: { statut: "REJETEE" } });
-    return res.json(misAJour);
-  }
+    if (role !== "GAS_PROGRAMME_NATIONAL") {
+      return res.status(403).json({
+        erreur: "Seul le GAS Programme national peut rejeter une réquisition (les autres niveaux valident ou modifient).",
+      });
+    }
 
-  if (decision === "modifier" && Array.isArray(lignes)) {
-    await Promise.all(
-      lignes.map((l) =>
-        prisma.requisitionLigne.update({
-          where: { id: l.requisitionLigneId },
-          data: { quantiteValidee: l.quantiteValidee },
-        })
-      )
-    );
-
-    const requisitionAJour = await prisma.requisition.findUnique({
+    const requisitionAvecLignes = await prisma.requisition.findUnique({
       where: { id },
       include: { lignes: { include: { produit: true } } },
     });
-    const etabActuel = await prisma.etablissement.findUnique({ where: { id: etablissementId } });
-    const etablissementPrecedent = await trouverEtablissementPrecedent(etabActuel, requisitionAJour);
 
+    const etablissementPrecedent = await trouverEtablissementPrecedent(etabActuel, requisitionAvecLignes);
     if (!etablissementPrecedent) {
       return res.status(500).json({
-        erreur: "Impossible de déterminer le niveau précédent pour confirmer cette modification.",
+        erreur: "Impossible de déterminer le GAS DRS à qui renvoyer cette réquisition.",
       });
     }
 
     const misAJour = await prisma.requisition.update({
       where: { id },
-      data: { statut: "MODIFIEE_EN_ATTENTE_CONFIRMATION", niveauActuelId: etablissementPrecedent.id },
+      data: { statut: "REJETEE_POUR_CORRECTION", niveauActuelId: etablissementPrecedent.id },
     });
+
+    await creerNotification({
+      etablissementId: etablissementPrecedent.id,
+      type: "REJETEE_POUR_CORRECTION",
+      message: `La réquisition envoyée au GAS Programme national a été rejetée et nécessite une correction.`,
+      requisitionId: id,
+    });
+
     return res.json(misAJour);
   }
 
-  if (decision === "valider") {
+  // ---------------------------------------------------------------------
+  // VALIDER ou MODIFIER — partagent désormais la même logique : les
+  // quantités sont éventuellement ajustées, puis la réquisition avance
+  // normalement dans le circuit (livraison locale, remontée, scission).
+  // Aucun blocage : seule la notification distingue une validation d'une
+  // modification.
+  // ---------------------------------------------------------------------
+  if (decision === "valider" || decision === "modifier") {
     if (Array.isArray(lignes)) {
       await Promise.all(
         lignes.map((l) =>
@@ -168,7 +199,8 @@ async function traiterDecision(req, res) {
       include: { lignes: { include: { produit: true } } },
     });
 
-    const etabActuel = await prisma.etablissement.findUnique({ where: { id: etablissementId } });
+    const typeNotif = decision === "modifier" ? "MODIFIEE" : "VALIDEE";
+    const etablissementPrecedent = await trouverEtablissementPrecedent(etabActuel, requisitionAJour);
 
     const repartition = [];
     for (const ligne of requisitionAJour.lignes) {
@@ -212,7 +244,7 @@ async function traiterDecision(req, res) {
             quantite: lb.quantiteEnvoyee,
             referenceType: "BL",
             referenceId: blGenere.id,
-            utilisateurId: req.utilisateur.utilisateurId,
+            utilisateurId,
           },
         });
       }
@@ -226,6 +258,17 @@ async function traiterDecision(req, res) {
 
     if (lignesARemonter.length === 0) {
       const misAJour = await prisma.requisition.update({ where: { id }, data: { statut: "CLOTUREE" } });
+      if (etablissementPrecedent) {
+        await creerNotification({
+          etablissementId: etablissementPrecedent.id,
+          type: typeNotif,
+          message:
+            decision === "modifier"
+              ? "Ta réquisition a été modifiée puis entièrement livrée."
+              : "Ta réquisition a été validée et entièrement livrée.",
+          requisitionId: id,
+        });
+      }
       return res.json({ requisition: misAJour, bordereauLivraison: blGenere, livreeDirectement: true });
     }
 
@@ -239,6 +282,17 @@ async function traiterDecision(req, res) {
         )
       );
       const misAJour = await prisma.requisition.update({ where: { id }, data: { statut: "VALIDEE" } });
+      if (etablissementPrecedent) {
+        await creerNotification({
+          etablissementId: etablissementPrecedent.id,
+          type: typeNotif,
+          message:
+            decision === "modifier"
+              ? "Ta réquisition a été modifiée au dernier niveau du circuit."
+              : "Ta réquisition a été validée au dernier niveau du circuit.",
+          requisitionId: id,
+        });
+      }
       return res.json({ requisition: misAJour, bordereauLivraison: blGenere, livreeDirectement: lignesALivrer.length > 0 });
     }
 
@@ -275,6 +329,17 @@ async function traiterDecision(req, res) {
         where: { id },
         data: { statut: "EN_ATTENTE", niveauActuelId: seulGroupe.etablissement.id },
       });
+      if (etablissementPrecedent) {
+        await creerNotification({
+          etablissementId: etablissementPrecedent.id,
+          type: typeNotif,
+          message:
+            decision === "modifier"
+              ? `Ta réquisition a été modifiée et transmise à ${seulGroupe.etablissement.nom}.`
+              : `Ta réquisition a été validée et transmise à ${seulGroupe.etablissement.nom}.`,
+          requisitionId: id,
+        });
+      }
       return res.json({ requisition: misAJour, bordereauLivraison: null, livreeDirectement: false });
     }
 
@@ -301,6 +366,18 @@ async function traiterDecision(req, res) {
 
     const misAJour = await prisma.requisition.update({ where: { id }, data: { statut: "SCINDEE" } });
 
+    if (etablissementPrecedent) {
+      const nomsDestinations = Array.from(groupes.values())
+        .map((g) => g.etablissement.nom)
+        .join(", ");
+      await creerNotification({
+        etablissementId: etablissementPrecedent.id,
+        type: "SCINDEE",
+        message: `Ta réquisition a été scindée en ${requisitionsFilles.length} réquisition(s), envoyée(s) à : ${nomsDestinations}.`,
+        requisitionId: id,
+      });
+    }
+
     return res.json({
       requisition: misAJour,
       requisitionsFilles,
@@ -309,6 +386,9 @@ async function traiterDecision(req, res) {
       partiel: lignesALivrer.length > 0,
     });
   }
+
+  return res.status(400).json({ erreur: "Décision non reconnue." });
+}
 
 // POST /requisitions/reapprovisionnement
 // Permet au GAS Moughataa et au GAS DRS de passer leur propre commande de
