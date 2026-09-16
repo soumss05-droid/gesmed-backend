@@ -66,6 +66,31 @@ async function listerAValider(req, res) {
   return res.json(requisitions);
 }
 
+// GET /requisitions/mes-requisitions
+// Liste les réquisitions créées par l'établissement de l'utilisateur
+// connecté (celles où il est le demandeur d'origine), avec leur statut
+// actuel et leur niveau actuel. Inclut aussi les réquisitions filles issues
+// d'une éventuelle scission, pour que le demandeur voie le détail complet
+// même quand sa demande a été répartie sur plusieurs programmes.
+async function listerMesRequisitions(req, res) {
+  const { etablissementId } = req.utilisateur;
+  const requisitions = await prisma.requisition.findMany({
+    where: { etablissementDemandeurId: etablissementId, requisitionParentId: null },
+    include: {
+      lignes: { include: { produit: true } },
+      niveauActuel: { select: { nom: true } },
+      requisitionsEnfants: {
+        include: {
+          lignes: { include: { produit: true } },
+          niveauActuel: { select: { nom: true } },
+        },
+      },
+    },
+    orderBy: { dateCreation: "desc" },
+  });
+  return res.json(requisitions);
+}
+
 // Détermine l'établissement qui a envoyé la réquisition au niveau actuel —
 // utilisé pour notifier ce niveau du résultat (validée/modifiée/scindée),
 // et pour renvoyer la réquisition en correction en cas de rejet. Le chemin
@@ -118,8 +143,6 @@ async function creerNotification({ etablissementId, type, message, requisitionId
       data: { etablissementId, type, message, requisitionId, produitId },
     });
   } catch (erreur) {
-    // Une notification manquée ne doit jamais faire échouer le circuit
-    // métier — on journalise seulement.
     console.error("Erreur lors de la création d'une notification :", erreur);
   }
 }
@@ -296,10 +319,6 @@ async function traiterDecision(req, res) {
       return res.json({ requisition: misAJour, bordereauLivraison: blGenere, livreeDirectement: lignesALivrer.length > 0 });
     }
 
-    // Regroupe les lignes à remonter par établissement destinataire. Au niveau
-    // GAS Programme national, le regroupement se fait par programme (chaque
-    // produit appartient à un programme, et chaque GAS Programme national ne
-    // gère qu'un seul programme) — pas juste "le premier trouvé".
     const groupes = new Map();
     if (typeSuivant === "GAS_PROGRAMME_NATIONAL") {
       for (const { ligne, aRemonter } of lignesARemonter) {
@@ -390,17 +409,9 @@ async function traiterDecision(req, res) {
   return res.status(400).json({ erreur: "Décision non reconnue." });
 }
 
-// POST /requisitions/reapprovisionnement
-// Permet au GAS Moughataa et au GAS DRS de passer leur propre commande de
-// réapprovisionnement, indépendamment de toute réquisition précise venant
-// d'en dessous — basée sur leur CMM propre et leur stock disponible cumulé
-// (voir calculerCommandeSuggereePourEtablissement). Réutilise le même
-// circuit d'escalade que les réquisitions classiques : le GAS Moughataa
-// commande à son GAS DRS, le GAS DRS commande au(x) GAS Programme national
-// concerné(s) (scindé par programme si plusieurs sont touchés).
 async function creerCommandeReapprovisionnement(req, res) {
   const { etablissementId, role } = req.utilisateur;
-  const { lignes, justification } = req.body; // lignes optionnelles pour ajuster manuellement la suggestion
+  const { lignes, justification } = req.body;
 
   if (!["GAS_MOUGHATAA", "GESTIONNAIRE_DRS"].includes(role)) {
     return res.status(403).json({
@@ -458,9 +469,6 @@ async function creerCommandeReapprovisionnement(req, res) {
     return res.status(500).json({ erreur: "Établissement incohérent pour ce rôle." });
   }
 
-  // GAS DRS : regroupe les lignes par programme (comme la scission déjà en
-  // place), puisqu'il n'existe pas un seul GAS Programme national mais un
-  // par programme.
   const produitsInfo = await prisma.produit.findMany({
     where: { id: { in: lignesACommander.map((l) => l.produitId) } },
   });
@@ -505,4 +513,4 @@ async function creerCommandeReapprovisionnement(req, res) {
   return res.status(201).json({ requisitions: requisitionsCreees });
 }
 
-module.exports = { creerRequisition, listerAValider, traiterDecision, creerCommandeReapprovisionnement };
+module.exports = { creerRequisition, listerAValider, listerMesRequisitions, traiterDecision, creerCommandeReapprovisionnement };
