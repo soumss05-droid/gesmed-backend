@@ -143,6 +143,8 @@ async function creerNotification({ etablissementId, type, message, requisitionId
       data: { etablissementId, type, message, requisitionId, produitId },
     });
   } catch (erreur) {
+    // Une notification manquée ne doit jamais faire échouer le circuit
+    // métier — on journalise seulement.
     console.error("Erreur lors de la création d'une notification :", erreur);
   }
 }
@@ -277,6 +279,37 @@ async function traiterDecision(req, res) {
           data: { quantiteTotale: { decrement: aLivrer } },
         });
       }
+
+      // Alerte de rupture : uniquement quand c'est la CAMEC qui vient de
+      // livrer et que son propre stock tombe à zéro pour ce produit. On
+      // notifie tous les établissements ayant une réquisition encore en
+      // cours pour ce même produit précis, pour éviter qu'ils commandent
+      // inutilement quelque chose de momentanément indisponible.
+      if (etabActuel.type === "CAMEC") {
+        for (const { ligne } of lignesALivrer) {
+          const stockActuel = await prisma.stock.findUnique({
+            where: { produitId_etablissementId: { produitId: ligne.produitId, etablissementId } },
+          });
+          if (stockActuel && stockActuel.quantiteTotale <= 0) {
+            const requisitionsEnCours = await prisma.requisition.findMany({
+              where: {
+                statut: { in: ["EN_ATTENTE", "REJETEE_POUR_CORRECTION"] },
+                lignes: { some: { produitId: ligne.produitId } },
+              },
+              select: { etablissementDemandeurId: true },
+              distinct: ["etablissementDemandeurId"],
+            });
+            for (const r of requisitionsEnCours) {
+              await creerNotification({
+                etablissementId: r.etablissementDemandeurId,
+                type: "RUPTURE_STOCK",
+                message: `Le produit "${ligne.produit.nom}" est en rupture à la CAMEC. Évite de le commander pour l'instant.`,
+                produitId: ligne.produitId,
+              });
+            }
+          }
+        }
+      }
     }
 
     if (lignesARemonter.length === 0) {
@@ -319,6 +352,10 @@ async function traiterDecision(req, res) {
       return res.json({ requisition: misAJour, bordereauLivraison: blGenere, livreeDirectement: lignesALivrer.length > 0 });
     }
 
+    // Regroupe les lignes à remonter par établissement destinataire. Au niveau
+    // GAS Programme national, le regroupement se fait par programme (chaque
+    // produit appartient à un programme, et chaque GAS Programme national ne
+    // gère qu'un seul programme) — pas juste "le premier trouvé".
     const groupes = new Map();
     if (typeSuivant === "GAS_PROGRAMME_NATIONAL") {
       for (const { ligne, aRemonter } of lignesARemonter) {
@@ -409,9 +446,17 @@ async function traiterDecision(req, res) {
   return res.status(400).json({ erreur: "Décision non reconnue." });
 }
 
+// POST /requisitions/reapprovisionnement
+// Permet au GAS Moughataa et au GAS DRS de passer leur propre commande de
+// réapprovisionnement, indépendamment de toute réquisition précise venant
+// d'en dessous — basée sur leur CMM propre et leur stock disponible cumulé
+// (voir calculerCommandeSuggereePourEtablissement). Réutilise le même
+// circuit d'escalade que les réquisitions classiques : le GAS Moughataa
+// commande à son GAS DRS, le GAS DRS commande au(x) GAS Programme national
+// concerné(s) (scindé par programme si plusieurs sont touchés).
 async function creerCommandeReapprovisionnement(req, res) {
   const { etablissementId, role } = req.utilisateur;
-  const { lignes, justification } = req.body;
+  const { lignes, justification } = req.body; // lignes optionnelles pour ajuster manuellement la suggestion
 
   if (!["GAS_MOUGHATAA", "GESTIONNAIRE_DRS"].includes(role)) {
     return res.status(403).json({
@@ -469,6 +514,9 @@ async function creerCommandeReapprovisionnement(req, res) {
     return res.status(500).json({ erreur: "Établissement incohérent pour ce rôle." });
   }
 
+  // GAS DRS : regroupe les lignes par programme (comme la scission déjà en
+  // place), puisqu'il n'existe pas un seul GAS Programme national mais un
+  // par programme.
   const produitsInfo = await prisma.produit.findMany({
     where: { id: { in: lignesACommander.map((l) => l.produitId) } },
   });
