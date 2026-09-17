@@ -1,8 +1,10 @@
 const prisma = require("../config/prisma");
-const { selectionnerLotFEFO } = require("./stocks.controller");
+const { executerValidationOuModification, ErreurMetier } = require("./requisitions.controller");
 
 // GET /distribution/pretes
-// Réquisitions validées, prêtes à être expédiées par l'établissement connecté (CAMEC ou GAS DRS).
+// Réquisitions dont il reste un reliquat à envoyer depuis l'établissement
+// connecté (CAMEC ou GAS DRS) : arrivées au bout du circuit sans pouvoir
+// être totalement livrées faute de stock à ce moment-là.
 async function listerPretesAExpedier(req, res) {
   const { etablissementId } = req.utilisateur;
 
@@ -15,80 +17,38 @@ async function listerPretesAExpedier(req, res) {
 }
 
 // POST /distribution/:requisitionId/generer-bl
-// Génère un bordereau de livraison pour une réquisition validée,
-// en sélectionnant les lots à expédier selon la logique FEFO.
+// Relance la livraison d'une réquisition restée "VALIDEE" (reliquat non
+// couvert lors du premier passage), maintenant que le stock a pu être
+// reconstitué. Ne duplique aucune logique : délègue entièrement à
+// executerValidationOuModification, le même chemin que la validation
+// initiale — mêmes statuts, mêmes notifications, même alerte de rupture.
 async function genererBl(req, res) {
-  const { etablissementId } = req.utilisateur;
+  const { etablissementId, utilisateurId } = req.utilisateur;
   const { requisitionId } = req.params;
 
-  const requisition = await prisma.requisition.findUnique({
-    where: { id: requisitionId },
-    include: { lignes: true },
-  });
-
-  if (!requisition || requisition.niveauActuelId !== etablissementId || requisition.statut !== "VALIDEE") {
-    return res.status(404).json({ erreur: "Réquisition introuvable ou non prête à expédier." });
-  }
-
-  const lignesBl = [];
-
-  for (const ligne of requisition.lignes) {
-    const { lotsChoisis, quantiteNonCouverte } = await selectionnerLotFEFO(
-      ligne.produitId,
+  try {
+    const resultat = await executerValidationOuModification({
       etablissementId,
-      ligne.quantiteValidee
-    );
+      utilisateurId,
+      requisitionId,
+      decision: "valider",
+      lignes: null,
+    });
 
-    if (quantiteNonCouverte > 0) {
+    if (!resultat.bordereauLivraison) {
       return res.status(400).json({
-        erreur: `Stock insuffisant pour le produit ${ligne.produitId} : ${quantiteNonCouverte} unités manquantes.`,
+        erreur: "Rien à expédier pour l'instant : le stock ne couvre toujours pas ce reliquat.",
       });
     }
 
-    for (const lotChoisi of lotsChoisis) {
-      lignesBl.push({
-        produitId: ligne.produitId,
-        lotId: lotChoisi.lotId,
-        quantiteEnvoyee: lotChoisi.quantite,
-      });
+    return res.status(201).json(resultat);
+  } catch (erreur) {
+    if (erreur instanceof ErreurMetier) {
+      return res.status(erreur.statut).json({ erreur: erreur.message });
     }
+    console.error("Erreur lors de la relance de l'expédition :", erreur);
+    return res.status(500).json({ erreur: "Erreur serveur lors de la relance de l'expédition." });
   }
-
-  const bl = await prisma.bordereauLivraison.create({
-    data: {
-      requisitionId: requisition.id,
-      etablissementExpediteurId: etablissementId,
-      etablissementDestinataireId: requisition.etablissementDemandeurId,
-      statut: "ENVOYE",
-      lignes: { create: lignesBl },
-    },
-    include: { lignes: true },
-  });
-
-  // Décrémenter les lots et journaliser les mouvements de sortie.
-  for (const lb of lignesBl) {
-    await prisma.lot.update({
-      where: { id: lb.lotId },
-      data: { quantite: { decrement: lb.quantiteEnvoyee } },
-    });
-    await prisma.mouvementStock.create({
-      data: {
-        lotId: lb.lotId,
-        type: "SORTIE",
-        quantite: lb.quantiteEnvoyee,
-        referenceType: "BL",
-        referenceId: bl.id,
-        utilisateurId: req.utilisateur.utilisateurId,
-      },
-    });
-  }
-
-  await prisma.requisition.update({
-    where: { id: requisition.id },
-    data: { statut: "EXPEDIEE" },
-  });
-
-  return res.status(201).json(bl);
 }
 
 // GET /reception/en-attente
@@ -107,7 +67,9 @@ async function listerEnAttenteReception(req, res) {
 // POST /reception/:blId/confirmer
 // Body : { lignes: [{ blLigneId, quantiteRecue }] }
 // Compare quantité envoyée / reçue par ligne. Sans écart : stock mis à jour
-// automatiquement. Avec écart : la ligne est bloquée en attente d'arbitrage.
+// automatiquement, avec un nouveau lot reprenant le vrai numéro et la vraie
+// date de péremption du lot d'origine. Avec écart : la ligne est bloquée en
+// attente d'arbitrage (voir ecarts.controller.js).
 async function confirmerReception(req, res) {
   const { etablissementId, utilisateurId } = req.utilisateur;
   const { blId } = req.params;
@@ -115,7 +77,7 @@ async function confirmerReception(req, res) {
 
   const bl = await prisma.bordereauLivraison.findUnique({
     where: { id: blId },
-    include: { lignes: true },
+    include: { lignes: { include: { lot: true } } },
   });
 
   if (!bl || bl.etablissementDestinataireId !== etablissementId) {
@@ -131,7 +93,6 @@ async function confirmerReception(req, res) {
     const ecart = ligneBl.quantiteEnvoyee - ligneRecue.quantiteRecue;
 
     if (ecart === 0) {
-      // Pas d'écart : mise à jour automatique du stock du destinataire.
       await prisma.stock.upsert({
         where: { produitId_etablissementId: { produitId: ligneBl.produitId, etablissementId } },
         update: { quantiteTotale: { increment: ligneRecue.quantiteRecue } },
@@ -144,13 +105,24 @@ async function confirmerReception(req, res) {
         },
       });
 
-      await prisma.lot.create({
+      const nouveauLot = await prisma.lot.create({
         data: {
           produitId: ligneBl.produitId,
           etablissementId,
-          numeroLot: `RECU-${ligneBl.lotId}`,
-          datePeremption: new Date(),
+          numeroLot: ligneBl.lot.numeroLot,
+          datePeremption: ligneBl.lot.datePeremption,
           quantite: ligneRecue.quantiteRecue,
+        },
+      });
+
+      await prisma.mouvementStock.create({
+        data: {
+          lotId: nouveauLot.id,
+          type: "ENTREE",
+          quantite: ligneRecue.quantiteRecue,
+          referenceType: "BL",
+          referenceId: bl.id,
+          utilisateurId,
         },
       });
 

@@ -25,7 +25,7 @@ async function traiterEcart(req, res) {
 
   const ligne = await prisma.blLigne.findUnique({
     where: { id: blLigneId },
-    include: { bl: true },
+    include: { bl: true, lot: true },
   });
 
   if (!ligne || ligne.ecartStatut !== "EN_ATTENTE") {
@@ -43,7 +43,6 @@ async function traiterEcart(req, res) {
   if (decision === "debloquer") {
     const etablissementId = ligne.bl.etablissementDestinataireId;
 
-    // Débloquer met à jour le stock du destinataire avec la quantité réellement reçue.
     await prisma.stock.upsert({
       where: { produitId_etablissementId: { produitId: ligne.produitId, etablissementId } },
       update: { quantiteTotale: { increment: ligne.quantiteRecue } },
@@ -56,13 +55,24 @@ async function traiterEcart(req, res) {
       },
     });
 
-    await prisma.lot.create({
+    const nouveauLot = await prisma.lot.create({
       data: {
         produitId: ligne.produitId,
         etablissementId,
-        numeroLot: `RECU-ECART-${ligne.lotId}`,
-        datePeremption: new Date(),
+        numeroLot: ligne.lot.numeroLot,
+        datePeremption: ligne.lot.datePeremption,
         quantite: ligne.quantiteRecue,
+      },
+    });
+
+    await prisma.mouvementStock.create({
+      data: {
+        lotId: nouveauLot.id,
+        type: "ENTREE",
+        quantite: ligne.quantiteRecue,
+        referenceType: "BL",
+        referenceId: ligne.bl.id,
+        utilisateurId,
       },
     });
 
