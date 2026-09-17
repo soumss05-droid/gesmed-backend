@@ -3,11 +3,17 @@ const { authentifier } = require("../middleware/auth");
 const { autoriser } = require("../middleware/authorize");
 const {
   listerDrs,
+  creerDrs,
+  listerProgrammes,
+  listerRoles,
   listerEtablissements,
   creerMoughataa,
   creerEtablissement,
+  modifierEtablissement,
   creerUtilisateur,
+  modifierUtilisateur,
   rattacherUtilisateur,
+  retirerRattachement,
   listerUtilisateurs,
 } = require("../controllers/admin.controller");
 
@@ -17,11 +23,21 @@ const router = express.Router();
 router.use(authentifier, autoriser("ADMIN"));
 
 router.get("/drs", listerDrs);
+router.post("/drs", creerDrs);
+
+router.get("/programmes", listerProgrammes);
+router.get("/roles", listerRoles);
+
 router.get("/etablissements", listerEtablissements);
-router.post("/moughataa", creerMoughataa);
 router.post("/etablissements", creerEtablissement);
+router.patch("/etablissements/:id", modifierEtablissement);
+
+router.post("/moughataa", creerMoughataa);
+
 router.get("/utilisateurs", listerUtilisateurs);
 router.post("/utilisateurs", creerUtilisateur);
+router.patch("/utilisateurs/:id", modifierUtilisateur);
 router.post("/utilisateurs/:id/rattachements", rattacherUtilisateur);
+router.delete("/utilisateurs/:id/rattachements/:rattachementId", retirerRattachement);
 
 module.exports = router;
