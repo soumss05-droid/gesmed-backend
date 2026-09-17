@@ -15,6 +15,8 @@ const {
   rattacherUtilisateur,
   retirerRattachement,
   listerUtilisateurs,
+  listerToutesNotifications,
+  listerMoughataa,
 } = require("../controllers/admin.controller");
 
 const router = express.Router();
@@ -39,5 +41,9 @@ router.post("/utilisateurs", creerUtilisateur);
 router.patch("/utilisateurs/:id", modifierUtilisateur);
 router.post("/utilisateurs/:id/rattachements", rattacherUtilisateur);
 router.delete("/utilisateurs/:id/rattachements/:rattachementId", retirerRattachement);
+
+router.get("/notifications", listerToutesNotifications);
+
+router.get("/moughataa", listerMoughataa);
 
 module.exports = router;

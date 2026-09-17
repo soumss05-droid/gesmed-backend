@@ -13,6 +13,7 @@ async function listerNotifications(req, res) {
     include: {
       requisition: { select: { id: true, statut: true } },
       produit: { select: { id: true, nom: true } },
+      etablissementAuteur: { select: { nom: true } },
     },
     take: 100,
   });

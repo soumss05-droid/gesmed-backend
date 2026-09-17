@@ -121,10 +121,10 @@ async function trouverEtablissementPrecedent(etabActuel, requisitionAJour) {
   return null;
 }
 
-async function creerNotification({ etablissementId, type, message, requisitionId = null, produitId = null }) {
+async function creerNotification({ etablissementId, etablissementAuteurId = null, type, message, requisitionId = null, produitId = null }) {
   try {
     await prisma.notification.create({
-      data: { etablissementId, type, message, requisitionId, produitId },
+      data: { etablissementId, etablissementAuteurId, type, message, requisitionId, produitId },
     });
   } catch (erreur) {
     console.error("Erreur lors de la création d'une notification :", erreur);
@@ -229,6 +229,8 @@ async function executerValidationOuModification({ etablissementId, utilisateurId
       });
     }
 
+    // Alerte de rupture : uniquement quand c'est la CAMEC qui vient de
+    // livrer et que son propre stock tombe à zéro pour ce produit.
     if (etabActuel.type === "CAMEC") {
       for (const { ligne } of lignesALivrer) {
         const stockActuel = await prisma.stock.findUnique({
@@ -246,6 +248,7 @@ async function executerValidationOuModification({ etablissementId, utilisateurId
           for (const r of requisitionsEnCours) {
             await creerNotification({
               etablissementId: r.etablissementDemandeurId,
+              etablissementAuteurId: etabActuel.id,
               type: "RUPTURE_STOCK",
               message: `Le produit "${ligne.produit.nom}" est en rupture à la CAMEC. Évite de le commander pour l'instant.`,
               produitId: ligne.produitId,
@@ -261,6 +264,7 @@ async function executerValidationOuModification({ etablissementId, utilisateurId
     if (etablissementPrecedent) {
       await creerNotification({
         etablissementId: etablissementPrecedent.id,
+        etablissementAuteurId: etabActuel.id,
         type: typeNotif,
         message:
           decision === "modifier"
@@ -285,6 +289,7 @@ async function executerValidationOuModification({ etablissementId, utilisateurId
     if (etablissementPrecedent) {
       await creerNotification({
         etablissementId: etablissementPrecedent.id,
+        etablissementAuteurId: etabActuel.id,
         type: typeNotif,
         message:
           decision === "modifier"
@@ -328,6 +333,7 @@ async function executerValidationOuModification({ etablissementId, utilisateurId
     if (etablissementPrecedent) {
       await creerNotification({
         etablissementId: etablissementPrecedent.id,
+        etablissementAuteurId: etabActuel.id,
         type: typeNotif,
         message:
           decision === "modifier"
@@ -368,6 +374,7 @@ async function executerValidationOuModification({ etablissementId, utilisateurId
       .join(", ");
     await creerNotification({
       etablissementId: etablissementPrecedent.id,
+      etablissementAuteurId: etabActuel.id,
       type: "SCINDEE",
       message: `Ta réquisition a été scindée en ${requisitionsFilles.length} réquisition(s), envoyée(s) à : ${nomsDestinations}.`,
       requisitionId,
@@ -421,6 +428,7 @@ async function traiterDecision(req, res) {
 
     await creerNotification({
       etablissementId: etablissementPrecedent.id,
+      etablissementAuteurId: etabActuel.id,
       type: "REJETEE_POUR_CORRECTION",
       message: `La réquisition envoyée au GAS Programme national a été rejetée et nécessite une correction.`,
       requisitionId: id,

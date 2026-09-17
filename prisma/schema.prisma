@@ -75,6 +75,7 @@ model Etablissement {
   blRecus                     BordereauLivraison[] @relation("BlDestinataire")
   inventaires                 InventairePhysique[]
   notifications                Notification[]
+  notificationsEnTantQuAuteur  Notification[] @relation("NotificationAuteur")
 
   @@map("etablissements")
 }
@@ -377,6 +378,8 @@ model Notification {
   id              String            @id @default(uuid())
   etablissementId String            @map("etablissement_id")
   etablissement   Etablissement     @relation(fields: [etablissementId], references: [id])
+  etablissementAuteurId String?     @map("etablissement_auteur_id")
+  etablissementAuteur   Etablissement? @relation("NotificationAuteur", fields: [etablissementAuteurId], references: [id])
   type            TypeNotification
   message         String
   requisitionId   String?           @map("requisition_id")

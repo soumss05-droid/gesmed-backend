@@ -243,6 +243,34 @@ async function listerUtilisateurs(req, res) {
   return res.json(utilisateurs);
 }
 
+// GET /admin/notifications — vue nationale de toutes les notifications,
+// tous établissements confondus, avec le destinataire et l'auteur visibles.
+// Seul l'Admin système, non rattaché à un établissement précis, a besoin de
+// cette vue globale (les autres rôles consultent /notifications, limitée à
+// leur propre établissement).
+async function listerToutesNotifications(req, res) {
+  const notifications = await prisma.notification.findMany({
+    orderBy: { createdAt: "desc" },
+    include: {
+      etablissement: { select: { nom: true } },
+      etablissementAuteur: { select: { nom: true } },
+      requisition: { select: { id: true, statut: true } },
+      produit: { select: { id: true, nom: true } },
+    },
+    take: 200,
+  });
+  return res.json(notifications);
+}
+
+// GET /admin/moughataa — liste des Moughataa (pour les menus déroulants)
+async function listerMoughataa(req, res) {
+  const moughataas = await prisma.moughataa.findMany({
+    include: { drs: { select: { nom: true } } },
+    orderBy: { nom: "asc" },
+  });
+  return res.json(moughataas);
+}
+
 module.exports = {
   listerDrs,
   creerDrs,
@@ -257,4 +285,6 @@ module.exports = {
   rattacherUtilisateur,
   retirerRattachement,
   listerUtilisateurs,
+  listerToutesNotifications,
+  listerMoughataa,
 };
