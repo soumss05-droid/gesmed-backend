@@ -77,7 +77,7 @@ async function stockReseau(req, res) {
     });
   } else if (role === "GAS_PROGRAMME_NATIONAL") {
     etablissementsCibles = await prisma.etablissement.findMany({ where: { type: "GAS_DRS" } });
-  } else if (role === "GESTIONNAIRE_DRS") {
+  } else if (role === "GESTIONNAIRE_DRS" || role === "DIRECTEUR_DRS") {
     etablissementsCibles = await prisma.etablissement.findMany({
       where: { OR: [{ id: etablissementId }, { type: "GAS_MOUGHATAA", drsId: etablissement.drsId }] },
     });
