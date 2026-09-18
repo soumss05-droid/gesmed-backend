@@ -286,6 +286,29 @@ async function listerTousLesLots(req, res) {
   return res.json(lots);
 }
 
+// DELETE /admin/drs/:id
+// Supprime une DRS uniquement si aucun établissement ni Moughataa n'y est
+// rattaché — sinon la contrainte de clé étrangère de la base l'empêchera de
+// toute façon, mais on donne un message clair plutôt qu'une erreur brute.
+async function supprimerDrs(req, res) {
+  const { id } = req.params;
+
+  try {
+    await prisma.drs.delete({ where: { id } });
+    return res.status(204).send();
+  } catch (err) {
+    if (err.code === "P2025") {
+      return res.status(404).json({ erreur: "DRS introuvable." });
+    }
+    if (err.code === "P2003") {
+      return res.status(409).json({
+        erreur: "Impossible de supprimer cette DRS : des établissements ou Moughataa y sont encore rattachés.",
+      });
+    }
+    throw err;
+  }
+}
+
 module.exports = {
   listerDrs,
   creerDrs,
@@ -303,4 +326,5 @@ module.exports = {
   listerToutesNotifications,
   listerMoughataa,
   listerTousLesLots,
+  supprimerDrs,
 };

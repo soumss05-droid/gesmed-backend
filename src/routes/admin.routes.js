@@ -18,6 +18,7 @@ const {
   listerToutesNotifications,
   listerMoughataa,
   listerTousLesLots,
+  supprimerDrs,
 } = require("../controllers/admin.controller");
 
 const router = express.Router();
@@ -27,6 +28,7 @@ router.use(authentifier, autoriser("ADMIN"));
 
 router.get("/drs", listerDrs);
 router.post("/drs", creerDrs);
+router.delete("/drs/:id", supprimerDrs);
 
 router.get("/programmes", listerProgrammes);
 router.get("/roles", listerRoles);
