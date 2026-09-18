@@ -17,6 +17,7 @@ const {
   listerUtilisateurs,
   listerToutesNotifications,
   listerMoughataa,
+  listerTousLesLots,
 } = require("../controllers/admin.controller");
 
 const router = express.Router();
@@ -45,5 +46,7 @@ router.delete("/utilisateurs/:id/rattachements/:rattachementId", retirerRattache
 router.get("/notifications", listerToutesNotifications);
 
 router.get("/moughataa", listerMoughataa);
+
+router.get("/stocks", listerTousLesLots);
 
 module.exports = router;

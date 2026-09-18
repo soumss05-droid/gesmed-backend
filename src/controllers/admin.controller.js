@@ -271,6 +271,21 @@ async function listerMoughataa(req, res) {
   return res.json(moughataas);
 }
 
+// GET /admin/stocks — vue nationale de tous les lots en stock (quantité >
+// 0), tous établissements confondus, pour permettre à l'Admin de filtrer
+// par produit, par date de péremption, ou par niveau (type d'établissement).
+async function listerTousLesLots(req, res) {
+  const lots = await prisma.lot.findMany({
+    where: { quantite: { gt: 0 } },
+    include: {
+      produit: { select: { id: true, nom: true } },
+      etablissement: { select: { id: true, nom: true, type: true } },
+    },
+    orderBy: { datePeremption: "asc" },
+  });
+  return res.json(lots);
+}
+
 module.exports = {
   listerDrs,
   creerDrs,
@@ -287,4 +302,5 @@ module.exports = {
   listerUtilisateurs,
   listerToutesNotifications,
   listerMoughataa,
+  listerTousLesLots,
 };
