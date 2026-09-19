@@ -81,7 +81,7 @@ async function stockReseau(req, res) {
     etablissementsCibles = await prisma.etablissement.findMany({
       where: { OR: [{ id: etablissementId }, { type: "GAS_MOUGHATAA", drsId: etablissement.drsId }] },
     });
-  } else if (role === "GAS_MOUGHATAA") {
+  } else if (role === "GAS_MOUGHATAA" || role === "MEDECIN_CHEF_MOUGHATAA") {
     etablissementsCibles = await prisma.etablissement.findMany({
       where: {
         OR: [
@@ -93,6 +93,15 @@ async function stockReseau(req, res) {
   } else {
     return res.status(403).json({ erreur: "Cette vue n'est pas disponible pour ton rôle." });
   }
+
+  // Le dépôt du niveau consulté apparaît toujours en premier dans la liste,
+  // avant les établissements qui en dépendent — plus lisible que l'ordre
+  // arbitraire renvoyé par la base.
+  etablissementsCibles.sort((a, b) => {
+    if (a.id === etablissementId) return -1;
+    if (b.id === etablissementId) return 1;
+    return 0;
+  });
 
   const etablissementIds = etablissementsCibles.map((e) => e.id);
 
@@ -238,7 +247,7 @@ async function calculerCmm(req, res) {
 
   if (role === "FORMATION_SANITAIRE") {
     filtreFs = { id: etablissementId };
-  } else if (role === "GAS_MOUGHATAA") {
+  } else if (role === "GAS_MOUGHATAA" || role === "MEDECIN_CHEF_MOUGHATAA") {
     filtreFs = { type: "FORMATION_SANITAIRE", moughataaId: etablissement.moughataaId };
   } else if (role === "GESTIONNAIRE_DRS") {
     filtreFs = { type: "FORMATION_SANITAIRE", drsId: etablissement.drsId };
