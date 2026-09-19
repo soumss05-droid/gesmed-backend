@@ -149,6 +149,19 @@ class ErreurMetier extends Error {
 // pour être réutilisée par distribution.controller.js quand on relance
 // l'envoi d'un reliquat une fois le stock reconstitué — pas de logique
 // dupliquée, un seul chemin de vérité.
+//
+// IMPORTANT — règle métier (revue) : une réquisition NORMALE d'une
+// formation sanitaire n'est traitée qu'une seule fois, au niveau GAS
+// Moughataa, puis se clôture immédiatement (livraison complète ou
+// partielle) — elle ne remonte JAMAIS au-delà. L'escalade ci-dessous
+// (scission, remontée vers GAS DRS/Programme national/CAMEC) ne
+// s'applique donc plus qu'aux commandes de réapprovisionnement autonome
+// (créées par creerCommandeReapprovisionnement), qui sont toujours
+// traitées à partir du niveau GAS DRS — jamais au niveau GAS Moughataa.
+// Une réquisition ne peut arriver au niveau GAS Moughataa que par une
+// réquisition d'origine formation sanitaire (creerRequisition) : la
+// condition etabActuel.type === "GAS_MOUGHATAA" suffit donc à distinguer
+// ce cas, sans champ supplémentaire.
 async function executerValidationOuModification({ etablissementId, utilisateurId, requisitionId, decision, lignes }) {
   const requisition = await prisma.requisition.findUnique({ where: { id: requisitionId } });
   if (!requisition || requisition.niveauActuelId !== etablissementId) {
@@ -274,6 +287,42 @@ async function executerValidationOuModification({ etablissementId, utilisateurId
       });
     }
     return { requisition: misAJour, bordereauLivraison: blGenere, livreeDirectement: true };
+  }
+
+  // -------------------------------------------------------------------------
+  // Cas GAS Moughataa (réquisition normale d'une formation sanitaire) : pas
+  // d'escalade, on clôture avec ce qui a pu être livré — complet ou partiel.
+  // La quantité non couverte est abandonnée (alignée sur ce qui a été livré),
+  // pour que l'historique reflète la réalité plutôt que la demande initiale.
+  // -------------------------------------------------------------------------
+  if (etabActuel.type === "GAS_MOUGHATAA") {
+    await Promise.all(
+      lignesARemonter.map(({ ligne, aRemonter }) =>
+        prisma.requisitionLigne.update({
+          where: { id: ligne.id },
+          data: { quantiteValidee: ligne.quantiteValidee - aRemonter },
+        })
+      )
+    );
+    const misAJour = await prisma.requisition.update({ where: { id: requisitionId }, data: { statut: "CLOTUREE" } });
+    if (etablissementPrecedent) {
+      await creerNotification({
+        etablissementId: etablissementPrecedent.id,
+        etablissementAuteurId: etabActuel.id,
+        type: typeNotif,
+        message:
+          lignesALivrer.length > 0
+            ? "Ta réquisition a été livrée partiellement — le reste n'a pas pu être fourni pour l'instant."
+            : "Ta réquisition n'a pas pu être livrée : stock insuffisant au GAS Moughataa.",
+        requisitionId,
+      });
+    }
+    return {
+      requisition: misAJour,
+      bordereauLivraison: blGenere,
+      livreeDirectement: lignesALivrer.length > 0,
+      partiel: lignesALivrer.length > 0,
+    };
   }
 
   const indexActuel = ORDRE_CIRCUIT.indexOf(etabActuel.type);
