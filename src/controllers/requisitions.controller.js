@@ -153,15 +153,12 @@ class ErreurMetier extends Error {
 // IMPORTANT — règle métier (revue) : une réquisition NORMALE d'une
 // formation sanitaire n'est traitée qu'une seule fois, au niveau GAS
 // Moughataa, puis se clôture immédiatement (livraison complète ou
-// partielle) — elle ne remonte JAMAIS au-delà. L'escalade ci-dessous
-// (scission, remontée vers GAS DRS/Programme national/CAMEC) ne
-// s'applique donc plus qu'aux commandes de réapprovisionnement autonome
-// (créées par creerCommandeReapprovisionnement), qui sont toujours
-// traitées à partir du niveau GAS DRS — jamais au niveau GAS Moughataa.
-// Une réquisition ne peut arriver au niveau GAS Moughataa que par une
-// réquisition d'origine formation sanitaire (creerRequisition) : la
-// condition etabActuel.type === "GAS_MOUGHATAA" suffit donc à distinguer
-// ce cas, sans champ supplémentaire.
+// partielle) — elle ne remonte JAMAIS au-delà. La même règle s'applique à
+// la commande de réapprovisionnement d'un GAS Moughataa traitée par le GAS
+// DRS : clôture immédiate, jamais de remontée vers CAMEC pour le compte du
+// Moughataa. Seule la propre commande du GAS DRS vers CAMEC (pour son
+// besoin régional) continue d'escalader via le GAS Programme national —
+// c'est la seule voie légitime vers CAMEC hors exception géographique.
 async function executerValidationOuModification({ etablissementId, utilisateurId, requisitionId, decision, lignes }) {
   const requisition = await prisma.requisition.findUnique({ where: { id: requisitionId } });
   if (!requisition || requisition.niveauActuelId !== etablissementId) {
@@ -290,12 +287,23 @@ async function executerValidationOuModification({ etablissementId, utilisateurId
   }
 
   // -------------------------------------------------------------------------
-  // Cas GAS Moughataa (réquisition normale d'une formation sanitaire) : pas
-  // d'escalade, on clôture avec ce qui a pu être livré — complet ou partiel.
-  // La quantité non couverte est abandonnée (alignée sur ce qui a été livré),
-  // pour que l'historique reflète la réalité plutôt que la demande initiale.
+  // Pas d'escalade dans deux cas précis : (1) GAS Moughataa traitant une
+  // réquisition normale d'une formation sanitaire, (2) GAS DRS traitant la
+  // commande de réapprovisionnement d'un GAS Moughataa. Dans les deux cas,
+  // on clôture avec ce qui a pu être livré — complet ou partiel — sans
+  // jamais remonter plus haut. La propre commande du GAS DRS vers CAMEC
+  // (demandeur = le GAS DRS lui-même) continue elle d'escalader normalement
+  // via le GAS Programme national, plus bas dans cette fonction.
   // -------------------------------------------------------------------------
-  if (etabActuel.type === "GAS_MOUGHATAA") {
+  let pasEscalade = etabActuel.type === "GAS_MOUGHATAA";
+  if (etabActuel.type === "GAS_DRS") {
+    const demandeurEtab = await prisma.etablissement.findUnique({
+      where: { id: requisitionAJour.etablissementDemandeurId },
+    });
+    pasEscalade = demandeurEtab?.type === "GAS_MOUGHATAA";
+  }
+
+  if (pasEscalade) {
     await Promise.all(
       lignesARemonter.map(({ ligne, aRemonter }) =>
         prisma.requisitionLigne.update({
@@ -313,7 +321,7 @@ async function executerValidationOuModification({ etablissementId, utilisateurId
         message:
           lignesALivrer.length > 0
             ? "Ta réquisition a été livrée partiellement — le reste n'a pas pu être fourni pour l'instant."
-            : "Ta réquisition n'a pas pu être livrée : stock insuffisant au GAS Moughataa.",
+            : `Ta réquisition n'a pas pu être livrée : stock insuffisant au ${etabActuel.type === "GAS_MOUGHATAA" ? "GAS Moughataa" : "GAS DRS"}.`,
         requisitionId,
       });
     }
@@ -322,6 +330,7 @@ async function executerValidationOuModification({ etablissementId, utilisateurId
       bordereauLivraison: blGenere,
       livreeDirectement: lignesALivrer.length > 0,
       partiel: lignesALivrer.length > 0,
+      escalade: false,
     };
   }
 
