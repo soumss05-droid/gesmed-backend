@@ -23,6 +23,10 @@ async function traiterEcart(req, res) {
   const { blLigneId } = req.params;
   const { decision, motif } = req.body;
 
+  if (!motif || !motif.trim()) {
+    return res.status(400).json({ erreur: "Un motif est obligatoire pour trancher un écart." });
+  }
+
   const ligne = await prisma.blLigne.findUnique({
     where: { id: blLigneId },
     include: { bl: true, lot: true },
@@ -35,7 +39,7 @@ async function traiterEcart(req, res) {
   if (decision === "maintenir") {
     const misAJour = await prisma.blLigne.update({
       where: { id: blLigneId },
-      data: { ecartStatut: "MAINTENU", ecartDecideurId: utilisateurId, ecartMotif: motif || null },
+      data: { ecartStatut: "MAINTENU", ecartDecideurId: utilisateurId, ecartMotif: motif.trim() },
     });
     return res.json(misAJour);
   }
@@ -43,6 +47,9 @@ async function traiterEcart(req, res) {
   if (decision === "debloquer") {
     const etablissementId = ligne.bl.etablissementDestinataireId;
 
+    // Débloquer met à jour le stock du destinataire avec la quantité
+    // réellement reçue, en reprenant le vrai numéro de lot et la vraie date
+    // de péremption du lot d'origine expédié.
     await prisma.stock.upsert({
       where: { produitId_etablissementId: { produitId: ligne.produitId, etablissementId } },
       update: { quantiteTotale: { increment: ligne.quantiteRecue } },
@@ -78,7 +85,7 @@ async function traiterEcart(req, res) {
 
     const misAJour = await prisma.blLigne.update({
       where: { id: blLigneId },
-      data: { ecartStatut: "DEBLOQUE", ecartDecideurId: utilisateurId, ecartMotif: motif || null },
+      data: { ecartStatut: "DEBLOQUE", ecartDecideurId: utilisateurId, ecartMotif: motif.trim() },
     });
 
     return res.json(misAJour);

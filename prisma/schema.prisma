@@ -97,6 +97,7 @@ model Utilisateur {
   etablissements   UserEtablissement[]
   mouvements       MouvementStock[]
   ecartsDecides    BlLigne[]           @relation("EcartDecideur")
+  ecartsInventaireDecides LigneInventaire[]
   inventaires      InventairePhysique[]
 
   @@map("utilisateurs")
@@ -357,6 +358,10 @@ model LigneInventaire {
   quantiteSysteme  Int                @map("quantite_systeme")
   quantitePhysique Int                @map("quantite_physique")
   ecart            Int
+  ecartStatut      EcartStatut?       @map("ecart_statut")
+  ecartDecideurId  String?            @map("ecart_decideur_id")
+  ecartDecideur    Utilisateur?       @relation(fields: [ecartDecideurId], references: [id])
+  ecartMotif       String?            @map("ecart_motif")
 
   @@map("lignes_inventaire")
 }
