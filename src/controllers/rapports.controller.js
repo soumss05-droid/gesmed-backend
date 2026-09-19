@@ -1,26 +1,23 @@
 const prisma = require("../config/prisma");
-
-// Détermine le périmètre de données visible selon le rôle de l'utilisateur.
-// AUDITEUR et ADMIN voient tout (vue nationale). Les autres rôles sont
-// cloisonnés à leur propre établissement.
-function construireFiltrePerimetre(utilisateur) {
-  if (utilisateur.role === "AUDITEUR" || utilisateur.role === "ADMIN") {
-    return {}; // pas de filtre = vue nationale
-  }
-  return { etablissementId: utilisateur.etablissementId };
-}
+const { perimetreEtablissementIds } = require("./stocks.controller");
 
 // GET /rapports/tableau-de-bord
-// KPIs de base, cloisonnés par périmètre.
+// KPIs de base. Le stock (références, ruptures, sous seuil, lots périmés)
+// couvre tout le périmètre réel du rôle (région pour un GAS DRS, Moughataa
+// pour un GAS Moughataa/Médecin Chef de Moughataa) — la file de réquisitions
+// en attente, elle, reste volontairement limitée à SON PROPRE niveau (ce
+// que l'utilisateur doit lui-même traiter, pas toute sa zone).
 async function tableauDeBord(req, res) {
-  const filtre = construireFiltrePerimetre(req.utilisateur);
+  const { etablissementId, role } = req.utilisateur;
+  const etablissementIds = await perimetreEtablissementIds(etablissementId, role);
+  const filtreStock = etablissementIds ? { etablissementId: { in: etablissementIds } } : {};
 
   const [stocks, requisitionsEnAttente, ecartsEnAttente] = await Promise.all([
-    prisma.stock.findMany({ where: filtre, include: { produit: true } }),
+    prisma.stock.findMany({ where: filtreStock, include: { produit: true } }),
     prisma.requisition.count({
       where: {
         statut: { in: ["EN_ATTENTE", "MODIFIEE_EN_ATTENTE_CONFIRMATION"] },
-        ...(filtre.etablissementId ? { niveauActuelId: filtre.etablissementId } : {}),
+        ...(role !== "AUDITEUR" && role !== "ADMIN" ? { niveauActuelId: etablissementId } : {}),
       },
     }),
     prisma.blLigne.count({ where: { ecartStatut: "EN_ATTENTE" } }),
@@ -34,7 +31,7 @@ async function tableauDeBord(req, res) {
 
   const lotsBientotPerimes = await prisma.lot.count({
     where: {
-      ...(filtre.etablissementId ? { etablissementId: filtre.etablissementId } : {}),
+      ...(etablissementIds ? { etablissementId: { in: etablissementIds } } : {}),
       quantite: { gt: 0 },
       datePeremption: { lte: dansTroisMois },
     },
@@ -46,17 +43,20 @@ async function tableauDeBord(req, res) {
     sousSeuil,
     lotsBientotPerimes,
     requisitionsEnAttente,
-    ecartsEnAttente: req.utilisateur.role === "AUDITEUR" || req.utilisateur.role === "ADMIN" ? ecartsEnAttente : undefined,
+    ecartsEnAttente: role === "AUDITEUR" || role === "ADMIN" ? ecartsEnAttente : undefined,
   });
 }
 
 // GET /rapports/produits-en-rupture
-// Classement des produits les plus souvent en rupture, cloisonné par périmètre.
+// Classement des produits les plus souvent en rupture, sur tout le périmètre
+// réel du rôle (même logique que le tableau de bord ci-dessus).
 async function produitsEnRupture(req, res) {
-  const filtre = construireFiltrePerimetre(req.utilisateur);
+  const { etablissementId, role } = req.utilisateur;
+  const etablissementIds = await perimetreEtablissementIds(etablissementId, role);
+  const filtreStock = etablissementIds ? { etablissementId: { in: etablissementIds } } : {};
 
   const stocksEnRupture = await prisma.stock.findMany({
-    where: { ...filtre, statut: "RUPTURE" },
+    where: { ...filtreStock, statut: "RUPTURE" },
     include: { produit: true, etablissement: true },
   });
 
@@ -72,11 +72,14 @@ async function produitsEnRupture(req, res) {
 }
 
 // GET /rapports/evolution-mouvements
-// Agrège les mouvements de stock des 30 derniers jours, jour par jour,
-// pour tracer une courbe entrées vs sorties. Cloisonné par périmètre comme
-// le reste des rapports.
+// Agrège les mouvements de stock des 30 derniers jours, jour par jour, pour
+// tracer une courbe entrées vs sorties. Utilise le vrai périmètre du rôle
+// (région entière pour un GAS DRS, Moughataa entière pour un GAS
+// Moughataa/Médecin Chef de Moughataa — pas seulement le dépôt propre), via
+// la même logique que le croisement de stocks, pour rester cohérent.
 async function evolutionMouvements(req, res) {
-  const filtre = construireFiltrePerimetre(req.utilisateur);
+  const { etablissementId, role } = req.utilisateur;
+  const etablissementIds = await perimetreEtablissementIds(etablissementId, role);
 
   const ilYA30Jours = new Date();
   ilYA30Jours.setDate(ilYA30Jours.getDate() - 30);
@@ -85,7 +88,7 @@ async function evolutionMouvements(req, res) {
     where: {
       dateMouvement: { gte: ilYA30Jours },
       type: { in: ["ENTREE", "SORTIE"] },
-      ...(filtre.etablissementId ? { lot: { etablissementId: filtre.etablissementId } } : {}),
+      ...(etablissementIds ? { lot: { etablissementId: { in: etablissementIds } } } : {}),
     },
     select: { type: true, quantite: true, dateMouvement: true },
   });

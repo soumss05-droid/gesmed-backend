@@ -78,8 +78,19 @@ async function stockReseau(req, res) {
   } else if (role === "GAS_PROGRAMME_NATIONAL") {
     etablissementsCibles = await prisma.etablissement.findMany({ where: { type: "GAS_DRS" } });
   } else if (role === "GESTIONNAIRE_DRS" || role === "DIRECTEUR_DRS") {
+    const moughataasRegion = await prisma.moughataa.findMany({
+      where: { drsId: etablissement.drsId },
+      select: { id: true },
+    });
+    const moughataaIds = moughataasRegion.map((m) => m.id);
     etablissementsCibles = await prisma.etablissement.findMany({
-      where: { OR: [{ id: etablissementId }, { type: "GAS_MOUGHATAA", drsId: etablissement.drsId }] },
+      where: {
+        OR: [
+          { id: etablissementId },
+          { type: "GAS_MOUGHATAA", drsId: etablissement.drsId },
+          { type: "FORMATION_SANITAIRE", moughataaId: { in: moughataaIds } },
+        ],
+      },
     });
   } else if (role === "GAS_MOUGHATAA" || role === "MEDECIN_CHEF_MOUGHATAA") {
     etablissementsCibles = await prisma.etablissement.findMany({
@@ -444,6 +455,179 @@ async function commandeSuggeree(req, res) {
   }
 }
 
+// GET /stocks/croisement?produitId=xxx&regroupement=moughataa|formationsanitaire
+// Répartition d'un produit sur le périmètre du niveau consulté — région
+// entière pour un GAS DRS/Directeur DRS (regroupée par Moughataa ou détaillée
+// par formation sanitaire), ou Moughataa entière pour un GAS
+// Moughataa/Médecin Chef de Moughataa (détaillée par formation sanitaire).
+// Renvoie aussi le total, pour afficher le "stock total" du niveau.
+async function croisementStock(req, res) {
+  const { etablissementId, role } = req.utilisateur;
+  const { produitId, regroupement } = req.query;
+
+  if (!produitId) {
+    return res.status(400).json({ erreur: "produitId requis." });
+  }
+
+  const etablissement = await prisma.etablissement.findUnique({ where: { id: etablissementId } });
+
+  let etablissementsCibles = [];
+  let regroupementsAutorises = [];
+
+  if (role === "ADMIN") {
+    etablissementsCibles = await prisma.etablissement.findMany({
+      include: { drs: true, moughataa: { include: { drs: true } } },
+    });
+    regroupementsAutorises = ["drs", "moughataa", "formationsanitaire"];
+  } else if (role === "GAS_PROGRAMME_NATIONAL") {
+    // Vue nationale, mais limitée aux produits de son propre programme.
+    const produit = await prisma.produit.findUnique({ where: { id: produitId } });
+    if (!produit || produit.programmeId !== etablissement.programmeId) {
+      return res.status(403).json({ erreur: "Ce produit n'appartient pas à ton programme." });
+    }
+    etablissementsCibles = await prisma.etablissement.findMany({
+      where: { type: { in: ["GAS_DRS", "GAS_MOUGHATAA", "FORMATION_SANITAIRE"] } },
+      include: { drs: true, moughataa: { include: { drs: true } } },
+    });
+    regroupementsAutorises = ["drs", "moughataa"];
+  } else if (role === "GESTIONNAIRE_DRS" || role === "DIRECTEUR_DRS") {
+    const moughataasRegion = await prisma.moughataa.findMany({
+      where: { drsId: etablissement.drsId },
+      select: { id: true },
+    });
+    const moughataaIds = moughataasRegion.map((m) => m.id);
+
+    etablissementsCibles = await prisma.etablissement.findMany({
+      where: {
+        OR: [
+          { id: etablissementId },
+          { type: "GAS_MOUGHATAA", drsId: etablissement.drsId },
+          { type: "FORMATION_SANITAIRE", moughataaId: { in: moughataaIds } },
+        ],
+      },
+      include: { moughataa: true },
+    });
+    regroupementsAutorises = ["moughataa", "formationsanitaire"];
+  } else if (role === "GAS_MOUGHATAA" || role === "MEDECIN_CHEF_MOUGHATAA") {
+    etablissementsCibles = await prisma.etablissement.findMany({
+      where: {
+        OR: [
+          { id: etablissementId },
+          { type: "FORMATION_SANITAIRE", moughataaId: etablissement.moughataaId },
+        ],
+      },
+    });
+    regroupementsAutorises = ["formationsanitaire"];
+  } else {
+    return res.status(403).json({ erreur: "Cette vue n'est pas disponible pour ton rôle." });
+  }
+
+  const regroupementFinal = regroupementsAutorises.includes(regroupement)
+    ? regroupement
+    : regroupementsAutorises[0];
+
+  const etablissementIds = etablissementsCibles.map((e) => e.id);
+  const stocks = await prisma.stock.findMany({
+    where: { etablissementId: { in: etablissementIds }, produitId },
+  });
+
+  let lignes;
+  if (regroupementFinal === "drs") {
+    const totaux = {};
+    for (const etab of etablissementsCibles) {
+      const stock = stocks.find((s) => s.etablissementId === etab.id);
+      if (!stock) continue;
+      const cle = etab.type === "GAS_DRS" ? etab.nom : etab.moughataa?.drs?.nom;
+      if (!cle) continue;
+      totaux[cle] = (totaux[cle] || 0) + stock.quantiteTotale;
+    }
+    lignes = Object.entries(totaux).map(([nom, quantite]) => ({ nom, quantite }));
+  } else if (regroupementFinal === "moughataa") {
+    const totaux = {};
+    for (const etab of etablissementsCibles) {
+      const stock = stocks.find((s) => s.etablissementId === etab.id);
+      if (!stock) continue;
+      // Toujours regrouper sous le nom de la Moughataa elle-même (jamais le
+      // nom de l'établissement GAS Moughataa, qui peut différer) — sinon le
+      // dépôt et ses formations sanitaires se retrouvent scindés en deux
+      // lignes distinctes pour la même Moughataa.
+      const cle = etab.moughataa?.nom;
+      if (!cle) continue;
+      totaux[cle] = (totaux[cle] || 0) + stock.quantiteTotale;
+    }
+    lignes = Object.entries(totaux).map(([nom, quantite]) => ({ nom, quantite }));
+  } else {
+    lignes = etablissementsCibles.map((etab) => {
+      const stock = stocks.find((s) => s.etablissementId === etab.id);
+      return {
+        nom: etab.type === "GAS_MOUGHATAA" ? `Dépôt ${etab.nom}` : etab.nom,
+        quantite: stock ? stock.quantiteTotale : 0,
+      };
+    });
+  }
+
+  lignes.sort((a, b) => b.quantite - a.quantite);
+  const total = lignes.reduce((acc, l) => acc + l.quantite, 0);
+
+  return res.json({ regroupement: regroupementFinal, regroupementsDisponibles: regroupementsAutorises, lignes, total });
+}
+
+// Liste des identifiants d'établissements du périmètre réel d'un
+// utilisateur, selon son rôle — réutilisée à la fois pour le stock réseau et
+// pour les rapports (évolution des mouvements), afin d'éviter deux logiques
+// différentes qui finiraient par diverger. `null` signifie "pas de filtre"
+// (vue nationale, réservée à ADMIN/AUDITEUR).
+async function perimetreEtablissementIds(etablissementId, role) {
+  const etablissement = await prisma.etablissement.findUnique({ where: { id: etablissementId } });
+
+  if (role === "ADMIN" || role === "AUDITEUR") return null;
+
+  if (role === "GESTIONNAIRE_CAMEC") {
+    const etabs = await prisma.etablissement.findMany({
+      where: { OR: [{ id: etablissementId }, { type: "GAS_DRS" }] },
+      select: { id: true },
+    });
+    return etabs.map((e) => e.id);
+  }
+
+  if (role === "GAS_PROGRAMME_NATIONAL") {
+    const etabs = await prisma.etablissement.findMany({ where: { type: "GAS_DRS" }, select: { id: true } });
+    return etabs.map((e) => e.id);
+  }
+
+  if (role === "GESTIONNAIRE_DRS" || role === "DIRECTEUR_DRS") {
+    const moughataasRegion = await prisma.moughataa.findMany({
+      where: { drsId: etablissement.drsId },
+      select: { id: true },
+    });
+    const moughataaIds = moughataasRegion.map((m) => m.id);
+    const etabs = await prisma.etablissement.findMany({
+      where: {
+        OR: [
+          { id: etablissementId },
+          { type: "GAS_MOUGHATAA", drsId: etablissement.drsId },
+          { type: "FORMATION_SANITAIRE", moughataaId: { in: moughataaIds } },
+        ],
+      },
+      select: { id: true },
+    });
+    return etabs.map((e) => e.id);
+  }
+
+  if (role === "GAS_MOUGHATAA" || role === "MEDECIN_CHEF_MOUGHATAA") {
+    const etabs = await prisma.etablissement.findMany({
+      where: {
+        OR: [{ id: etablissementId }, { type: "FORMATION_SANITAIRE", moughataaId: etablissement.moughataaId }],
+      },
+      select: { id: true },
+    });
+    return etabs.map((e) => e.id);
+  }
+
+  // FORMATION_SANITAIRE et rôles non listés : uniquement son propre établissement.
+  return [etablissementId];
+}
+
 module.exports = {
   listerStocks,
   calculerStatut,
@@ -454,4 +638,6 @@ module.exports = {
   calculerCmm,
   calculerCommandeSuggereePourEtablissement,
   commandeSuggeree,
+  croisementStock,
+  perimetreEtablissementIds,
 };
