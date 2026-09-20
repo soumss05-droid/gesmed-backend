@@ -65,6 +65,7 @@ model Etablissement {
   programme                   Programme?        @relation(fields: [programmeId], references: [id])
   adresse                     String?
   actif                       Boolean           @default(true)
+  approvisionnementDirectCamec Boolean          @default(false) @map("approvisionnement_direct_camec")
 
   userEtablissements          UserEtablissement[]
   lots                        Lot[]

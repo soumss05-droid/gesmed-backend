@@ -77,7 +77,7 @@ async function creerMoughataa(req, res) {
 // programmeId est pertinent uniquement pour un établissement de type
 // GAS_PROGRAMME_NATIONAL (chaque GAS Programme national gère un seul programme).
 async function creerEtablissement(req, res) {
-  const { nom, type, aStockPhysique, drsId, moughataaId, programmeId, adresse } = req.body;
+  const { nom, type, aStockPhysique, drsId, moughataaId, programmeId, adresse, approvisionnementDirectCamec } = req.body;
 
   if (!nom || !type) {
     return res.status(400).json({ erreur: "Nom et type requis." });
@@ -92,6 +92,7 @@ async function creerEtablissement(req, res) {
       moughataaId: moughataaId || null,
       programmeId: programmeId || null,
       adresse: adresse || null,
+      approvisionnementDirectCamec: !!approvisionnementDirectCamec,
     },
   });
 
@@ -103,7 +104,7 @@ async function creerEtablissement(req, res) {
 // corriger une fiche existante (ex. rattacher un DRS oublié à la création).
 async function modifierEtablissement(req, res) {
   const { id } = req.params;
-  const { nom, type, aStockPhysique, drsId, moughataaId, programmeId, adresse, actif } = req.body;
+  const { nom, type, aStockPhysique, drsId, moughataaId, programmeId, adresse, actif, approvisionnementDirectCamec } = req.body;
 
   const donnees = {};
   if (nom !== undefined) donnees.nom = nom;
@@ -114,6 +115,7 @@ async function modifierEtablissement(req, res) {
   if (programmeId !== undefined) donnees.programmeId = programmeId || null;
   if (adresse !== undefined) donnees.adresse = adresse || null;
   if (actif !== undefined) donnees.actif = !!actif;
+  if (approvisionnementDirectCamec !== undefined) donnees.approvisionnementDirectCamec = !!approvisionnementDirectCamec;
 
   try {
     const etablissement = await prisma.etablissement.update({ where: { id }, data: donnees });
@@ -162,15 +164,16 @@ async function creerUtilisateur(req, res) {
 }
 
 // PATCH /admin/utilisateurs/:id
-// Body : n'importe quel sous-ensemble de { nomComplet, telephone, actif,
-// estAdminSysteme, motDePasse }. motDePasse, s'il est fourni, réinitialise
-// le mot de passe (ré-haché) — sinon inchangé.
+// Body : n'importe quel sous-ensemble de { nomComplet, identifiant, telephone,
+// actif, estAdminSysteme, motDePasse }. motDePasse, s'il est fourni,
+// réinitialise le mot de passe (ré-haché) — sinon inchangé.
 async function modifierUtilisateur(req, res) {
   const { id } = req.params;
-  const { nomComplet, telephone, actif, estAdminSysteme, motDePasse } = req.body;
+  const { nomComplet, identifiant, telephone, actif, estAdminSysteme, motDePasse } = req.body;
 
   const donnees = {};
   if (nomComplet !== undefined) donnees.nomComplet = nomComplet;
+  if (identifiant !== undefined) donnees.identifiant = identifiant;
   if (telephone !== undefined) donnees.telephone = telephone || null;
   if (actif !== undefined) donnees.actif = !!actif;
   if (estAdminSysteme !== undefined) donnees.estAdminSysteme = !!estAdminSysteme;
@@ -188,6 +191,9 @@ async function modifierUtilisateur(req, res) {
   } catch (err) {
     if (err.code === "P2025") {
       return res.status(404).json({ erreur: "Utilisateur introuvable." });
+    }
+    if (err.code === "P2002") {
+      return res.status(409).json({ erreur: "Cet identifiant est déjà utilisé." });
     }
     throw err;
   }
@@ -346,6 +352,100 @@ async function recalculerTousLesStatutsStock(req, res) {
   return res.json({ message: `Correction terminée : ${corriges} stock(s) corrigé(s) sur ${stocks.length} au total.` });
 }
 
+// PATCH /admin/drs/:id
+// Body : { nom?, code?, actif? }
+async function modifierDrs(req, res) {
+  const { id } = req.params;
+  const { nom, code, actif } = req.body;
+
+  const donnees = {};
+  if (nom !== undefined) donnees.nom = nom;
+  if (code !== undefined) donnees.code = code;
+  if (actif !== undefined) donnees.actif = !!actif;
+
+  try {
+    const drs = await prisma.drs.update({ where: { id }, data: donnees });
+    return res.json(drs);
+  } catch (err) {
+    if (err.code === "P2025") {
+      return res.status(404).json({ erreur: "DRS introuvable." });
+    }
+    if (err.code === "P2002") {
+      return res.status(409).json({ erreur: "Ce code de DRS est déjà utilisé." });
+    }
+    throw err;
+  }
+}
+
+// PATCH /admin/moughataa/:id
+// Body : { nom?, drsId? }
+async function modifierMoughataa(req, res) {
+  const { id } = req.params;
+  const { nom, drsId } = req.body;
+
+  const donnees = {};
+  if (nom !== undefined) donnees.nom = nom;
+  if (drsId !== undefined) donnees.drsId = drsId;
+
+  try {
+    const moughataa = await prisma.moughataa.update({ where: { id }, data: donnees });
+    return res.json(moughataa);
+  } catch (err) {
+    if (err.code === "P2025") {
+      return res.status(404).json({ erreur: "Moughataa introuvable." });
+    }
+    throw err;
+  }
+}
+
+// DELETE /admin/moughataa/:id
+// Supprime une Moughataa uniquement si aucun établissement (GAS Moughataa,
+// formation sanitaire) n'y est rattaché — sinon message clair plutôt qu'une
+// erreur brute de contrainte de clé étrangère.
+async function supprimerMoughataa(req, res) {
+  const { id } = req.params;
+
+  try {
+    await prisma.moughataa.delete({ where: { id } });
+    return res.status(204).send();
+  } catch (err) {
+    if (err.code === "P2025") {
+      return res.status(404).json({ erreur: "Moughataa introuvable." });
+    }
+    if (err.code === "P2003") {
+      return res.status(409).json({
+        erreur: "Impossible de supprimer cette Moughataa : des établissements y sont encore rattachés.",
+      });
+    }
+    throw err;
+  }
+}
+
+// DELETE /admin/etablissements/:id
+// Supprime un établissement uniquement s'il n'a plus aucune dépendance
+// (stocks, lots, réquisitions, rattachements utilisateur, etc.) — sinon
+// message clair plutôt qu'une erreur brute de contrainte de clé étrangère.
+// Pour un établissement qui a déjà été utilisé, préférer la désactivation
+// (actif: false) plutôt que la suppression.
+async function supprimerEtablissement(req, res) {
+  const { id } = req.params;
+
+  try {
+    await prisma.etablissement.delete({ where: { id } });
+    return res.status(204).send();
+  } catch (err) {
+    if (err.code === "P2025") {
+      return res.status(404).json({ erreur: "Établissement introuvable." });
+    }
+    if (err.code === "P2003") {
+      return res.status(409).json({
+        erreur: "Impossible de supprimer cet établissement : des données (stocks, réquisitions, utilisateurs rattachés...) y sont encore liées. Désactive-le plutôt.",
+      });
+    }
+    throw err;
+  }
+}
+
 module.exports = {
   listerDrs,
   creerDrs,
@@ -365,4 +465,8 @@ module.exports = {
   listerTousLesLots,
   supprimerDrs,
   recalculerTousLesStatutsStock,
+  modifierDrs,
+  modifierMoughataa,
+  supprimerMoughataa,
+  supprimerEtablissement,
 };

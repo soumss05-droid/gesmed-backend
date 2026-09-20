@@ -142,6 +142,152 @@ class ErreurMetier extends Error {
 }
 
 // ---------------------------------------------------------------------------
+// Livraison en cascade pour un établissement "exception" (approvisionnement
+// direct CAMEC) : la CAMEC livre physiquement en un seul vrai trajet, mais le
+// SYSTÈME enregistre la livraison comme si elle traversait chaque niveau
+// intermédiaire (DRS, Moughataa), chacun confirmé automatiquement et
+// instantanément — pour que les statistiques (CMM, DMM, performance) de ces
+// niveaux restent justes. Seul le DERNIER maillon, vers le vrai destinataire
+// physique, reste EN ATTENTE de confirmation manuelle : c'est là qu'un écart
+// réel peut être constaté et arbitré, exactement comme un BL normal.
+async function livrerEnCascadeException({ etablissementCamecId, etablissementFinalId, requisitionId, lignesALivrer, utilisateurId }) {
+  const etablissementFinal = await prisma.etablissement.findUnique({
+    where: { id: etablissementFinalId },
+    include: { moughataa: true },
+  });
+
+  const drsId = etablissementFinal.moughataa?.drsId;
+
+  if (!drsId) {
+    throw new ErreurMetier(500, "Impossible de déterminer la région de l'établissement en approvisionnement direct.");
+  }
+
+  const drsEtab = await prisma.etablissement.findFirst({ where: { type: "GAS_DRS", drsId } });
+  if (!drsEtab) {
+    throw new ErreurMetier(500, "Aucun GAS DRS trouvé pour la région de cet établissement.");
+  }
+
+  const hops = [];
+  if (etablissementFinal.type === "GAS_MOUGHATAA") {
+    hops.push({ deId: etablissementCamecId, versId: drsEtab.id, autoConfirmer: true });
+    hops.push({ deId: drsEtab.id, versId: etablissementFinal.id, autoConfirmer: false });
+  } else {
+    const moughataaEtab = await prisma.etablissement.findFirst({
+      where: { type: "GAS_MOUGHATAA", moughataaId: etablissementFinal.moughataaId },
+    });
+    if (!moughataaEtab) {
+      throw new ErreurMetier(500, "Aucun GAS Moughataa trouvé pour cette formation sanitaire.");
+    }
+    hops.push({ deId: etablissementCamecId, versId: drsEtab.id, autoConfirmer: true });
+    hops.push({ deId: drsEtab.id, versId: moughataaEtab.id, autoConfirmer: true });
+    hops.push({ deId: moughataaEtab.id, versId: etablissementFinal.id, autoConfirmer: false });
+  }
+
+  let blCourant = null;
+
+  for (const hop of hops) {
+    const lignesBl = [];
+    for (const { produitId, quantite } of lignesALivrer) {
+      const { lotsChoisis } = await selectionnerLotFEFO(produitId, hop.deId, quantite);
+      for (const lotChoisi of lotsChoisis) {
+        lignesBl.push({ produitId, lotId: lotChoisi.lotId, quantiteEnvoyee: lotChoisi.quantite });
+      }
+    }
+
+    blCourant = await prisma.bordereauLivraison.create({
+      data: {
+        requisitionId,
+        etablissementExpediteurId: hop.deId,
+        etablissementDestinataireId: hop.versId,
+        statut: "ENVOYE",
+        lignes: { create: lignesBl },
+      },
+      include: { lignes: { include: { lot: true } } },
+    });
+
+    for (const lb of lignesBl) {
+      await prisma.lot.update({ where: { id: lb.lotId }, data: { quantite: { decrement: lb.quantiteEnvoyee } } });
+      await prisma.mouvementStock.create({
+        data: {
+          lotId: lb.lotId,
+          type: "SORTIE",
+          quantite: lb.quantiteEnvoyee,
+          referenceType: "BL",
+          referenceId: blCourant.id,
+          utilisateurId,
+        },
+      });
+    }
+    const produitsExpedies = [...new Set(lignesBl.map((lb) => lb.produitId))];
+    for (const pId of produitsExpedies) {
+      const totalProduit = lignesBl.filter((lb) => lb.produitId === pId).reduce((acc, lb) => acc + lb.quantiteEnvoyee, 0);
+      await prisma.stock.update({
+        where: { produitId_etablissementId: { produitId: pId, etablissementId: hop.deId } },
+        data: { quantiteTotale: { decrement: totalProduit } },
+      });
+      await recalculerStatutStock(pId, hop.deId);
+    }
+
+    if (hop.autoConfirmer) {
+      for (const lb of blCourant.lignes) {
+        const stockExistant = await prisma.stock.findUnique({
+          where: { produitId_etablissementId: { produitId: lb.produitId, etablissementId: hop.versId } },
+        });
+        if (stockExistant) {
+          await prisma.stock.update({
+            where: { produitId_etablissementId: { produitId: lb.produitId, etablissementId: hop.versId } },
+            data: { quantiteTotale: { increment: lb.quantiteEnvoyee } },
+          });
+        } else {
+          const produit = await prisma.produit.findUnique({ where: { id: lb.produitId } });
+          await prisma.stock.create({
+            data: {
+              produitId: lb.produitId,
+              etablissementId: hop.versId,
+              quantiteTotale: lb.quantiteEnvoyee,
+              seuilMin: produit?.seuilMinDefaut ?? 0,
+              seuilMax: produit?.seuilMaxDefaut ?? 0,
+              statut: "RUPTURE",
+            },
+          });
+        }
+        await recalculerStatutStock(lb.produitId, hop.versId);
+
+        const nouveauLot = await prisma.lot.create({
+          data: {
+            produitId: lb.produitId,
+            etablissementId: hop.versId,
+            numeroLot: lb.lot.numeroLot,
+            datePeremption: lb.lot.datePeremption,
+            quantite: lb.quantiteEnvoyee,
+          },
+        });
+        await prisma.mouvementStock.create({
+          data: {
+            lotId: nouveauLot.id,
+            type: "ENTREE",
+            quantite: lb.quantiteEnvoyee,
+            referenceType: "BL",
+            referenceId: blCourant.id,
+            utilisateurId,
+          },
+        });
+        await prisma.blLigne.update({
+          where: { id: lb.id },
+          data: { quantiteRecue: lb.quantiteEnvoyee, ecart: 0 },
+        });
+      }
+      await prisma.bordereauLivraison.update({
+        where: { id: blCourant.id },
+        data: { statut: "RECU_SANS_ECART", dateReceptionConfirmee: new Date() },
+      });
+    }
+  }
+
+  return blCourant; // le dernier maillon, celui qui reste EN ATTENTE de confirmation par le vrai destinataire
+}
+
+// ---------------------------------------------------------------------------
 // Cœur du traitement "valider" / "modifier" : ajuste éventuellement les
 // quantités, livre ce qui est possible avec le stock local (FEFO), alerte en
 // cas de rupture à la CAMEC, puis fait avancer la réquisition dans le
@@ -159,6 +305,16 @@ class ErreurMetier extends Error {
 // Moughataa. Seule la propre commande du GAS DRS vers CAMEC (pour son
 // besoin régional) continue d'escalader via le GAS Programme national —
 // c'est la seule voie légitime vers CAMEC hors exception géographique.
+//
+// EXCEPTION — établissement en approvisionnement direct CAMEC (champ
+// approvisionnementDirectCamec) : sa réquisition suit TOUJOURS le circuit
+// complet de validation jusqu'à la CAMEC, sans jamais bénéficier d'une
+// livraison partielle aux niveaux intermédiaires (Moughataa, DRS) — ceux-ci
+// ne vérifient même pas leur propre stock pour cette réquisition, elle les
+// traverse intacte. Une fois à la CAMEC, la livraison se fait en cascade
+// (voir livrerEnCascadeException) : chaque niveau intermédiaire est
+// auto-confirmé, seul le dernier maillon vers l'établissement exception
+// reste en attente de confirmation manuelle.
 async function executerValidationOuModification({ etablissementId, utilisateurId, requisitionId, decision, lignes }) {
   const requisition = await prisma.requisition.findUnique({ where: { id: requisitionId } });
   if (!requisition || requisition.niveauActuelId !== etablissementId) {
@@ -183,15 +339,26 @@ async function executerValidationOuModification({ etablissementId, utilisateurId
     include: { lignes: { include: { produit: true } } },
   });
 
+  const demandeurEtab = await prisma.etablissement.findUnique({
+    where: { id: requisitionAJour.etablissementDemandeurId },
+  });
+  const estException = demandeurEtab?.approvisionnementDirectCamec === true;
+
   const typeNotif = decision === "modifier" ? "MODIFIEE" : "VALIDEE";
   const etablissementPrecedent = await trouverEtablissementPrecedent(etabActuel, requisitionAJour);
 
+  // Pour un établissement exception, aucun niveau intermédiaire (tout sauf
+  // CAMEC) ne vérifie son propre stock — la réquisition les traverse
+  // intacte, pour ne remonter que jusqu'à la CAMEC.
   const repartition = [];
   for (const ligne of requisitionAJour.lignes) {
-    const stock = await prisma.stock.findUnique({
-      where: { produitId_etablissementId: { produitId: ligne.produitId, etablissementId } },
-    });
-    const disponible = stock ? stock.quantiteTotale : 0;
+    let disponible = 0;
+    if (!estException || etabActuel.type === "CAMEC") {
+      const stock = await prisma.stock.findUnique({
+        where: { produitId_etablissementId: { produitId: ligne.produitId, etablissementId } },
+      });
+      disponible = stock ? stock.quantiteTotale : 0;
+    }
     const aLivrer = Math.min(ligne.quantiteValidee, disponible);
     const aRemonter = ligne.quantiteValidee - aLivrer;
     repartition.push({ ligne, aLivrer, aRemonter });
@@ -202,46 +369,58 @@ async function executerValidationOuModification({ etablissementId, utilisateurId
 
   let blGenere = null;
   if (lignesALivrer.length > 0) {
-    const lignesBl = [];
-    for (const { ligne, aLivrer } of lignesALivrer) {
-      const { lotsChoisis } = await selectionnerLotFEFO(ligne.produitId, etablissementId, aLivrer);
-      for (const lotChoisi of lotsChoisis) {
-        lignesBl.push({ produitId: ligne.produitId, lotId: lotChoisi.lotId, quantiteEnvoyee: lotChoisi.quantite });
-      }
-    }
-    blGenere = await prisma.bordereauLivraison.create({
-      data: {
+    if (estException && etabActuel.type === "CAMEC") {
+      blGenere = await livrerEnCascadeException({
+        etablissementCamecId: etablissementId,
+        etablissementFinalId: requisitionAJour.etablissementDemandeurId,
         requisitionId: requisitionAJour.id,
-        etablissementExpediteurId: etablissementId,
-        etablissementDestinataireId: requisitionAJour.etablissementDemandeurId,
-        statut: "ENVOYE",
-        lignes: { create: lignesBl },
-      },
-      include: { lignes: true },
-    });
-    for (const lb of lignesBl) {
-      await prisma.lot.update({ where: { id: lb.lotId }, data: { quantite: { decrement: lb.quantiteEnvoyee } } });
-      await prisma.mouvementStock.create({
+        lignesALivrer: lignesALivrer.map(({ ligne, aLivrer }) => ({ produitId: ligne.produitId, quantite: aLivrer })),
+        utilisateurId,
+      });
+    } else {
+      const lignesBl = [];
+      for (const { ligne, aLivrer } of lignesALivrer) {
+        const { lotsChoisis } = await selectionnerLotFEFO(ligne.produitId, etablissementId, aLivrer);
+        for (const lotChoisi of lotsChoisis) {
+          lignesBl.push({ produitId: ligne.produitId, lotId: lotChoisi.lotId, quantiteEnvoyee: lotChoisi.quantite });
+        }
+      }
+      blGenere = await prisma.bordereauLivraison.create({
         data: {
-          lotId: lb.lotId,
-          type: "SORTIE",
-          quantite: lb.quantiteEnvoyee,
-          referenceType: "BL",
-          referenceId: blGenere.id,
-          utilisateurId,
+          requisitionId: requisitionAJour.id,
+          etablissementExpediteurId: etablissementId,
+          etablissementDestinataireId: requisitionAJour.etablissementDemandeurId,
+          statut: "ENVOYE",
+          lignes: { create: lignesBl },
         },
+        include: { lignes: true },
       });
-    }
-    for (const { ligne, aLivrer } of lignesALivrer) {
-      await prisma.stock.update({
-        where: { produitId_etablissementId: { produitId: ligne.produitId, etablissementId } },
-        data: { quantiteTotale: { decrement: aLivrer } },
-      });
-      await recalculerStatutStock(ligne.produitId, etablissementId);
+      for (const lb of lignesBl) {
+        await prisma.lot.update({ where: { id: lb.lotId }, data: { quantite: { decrement: lb.quantiteEnvoyee } } });
+        await prisma.mouvementStock.create({
+          data: {
+            lotId: lb.lotId,
+            type: "SORTIE",
+            quantite: lb.quantiteEnvoyee,
+            referenceType: "BL",
+            referenceId: blGenere.id,
+            utilisateurId,
+          },
+        });
+      }
+      for (const { ligne, aLivrer } of lignesALivrer) {
+        await prisma.stock.update({
+          where: { produitId_etablissementId: { produitId: ligne.produitId, etablissementId } },
+          data: { quantiteTotale: { decrement: aLivrer } },
+        });
+        await recalculerStatutStock(ligne.produitId, etablissementId);
+      }
     }
 
     // Alerte de rupture : uniquement quand c'est la CAMEC qui vient de
-    // livrer et que son propre stock tombe à zéro pour ce produit.
+    // livrer et que son propre stock tombe à zéro pour ce produit. Fonctionne
+    // identiquement pour une livraison en cascade, puisque le premier maillon
+    // décrémente déjà le vrai stock CAMEC de la même façon.
     if (etabActuel.type === "CAMEC") {
       for (const { ligne } of lignesALivrer) {
         const stockActuel = await prisma.stock.findUnique({
@@ -288,20 +467,21 @@ async function executerValidationOuModification({ etablissementId, utilisateurId
   }
 
   // -------------------------------------------------------------------------
-  // Pas d'escalade dans deux cas précis : (1) GAS Moughataa traitant une
-  // réquisition normale d'une formation sanitaire, (2) GAS DRS traitant la
-  // commande de réapprovisionnement d'un GAS Moughataa. Dans les deux cas,
-  // on clôture avec ce qui a pu être livré — complet ou partiel — sans
-  // jamais remonter plus haut. La propre commande du GAS DRS vers CAMEC
-  // (demandeur = le GAS DRS lui-même) continue elle d'escalader normalement
-  // via le GAS Programme national, plus bas dans cette fonction.
+  // Pas d'escalade dans deux cas précis (sauf établissement exception, qui
+  // escalade toujours) : (1) GAS Moughataa traitant une réquisition normale
+  // d'une formation sanitaire, (2) GAS DRS traitant la commande de
+  // réapprovisionnement d'un GAS Moughataa. Dans les deux cas, on clôture
+  // avec ce qui a pu être livré — complet ou partiel — sans jamais remonter
+  // plus haut. La propre commande du GAS DRS vers CAMEC (demandeur = le GAS
+  // DRS lui-même) continue elle d'escalader normalement via le GAS
+  // Programme national, plus bas dans cette fonction.
   // -------------------------------------------------------------------------
-  let pasEscalade = etabActuel.type === "GAS_MOUGHATAA";
-  if (etabActuel.type === "GAS_DRS") {
-    const demandeurEtab = await prisma.etablissement.findUnique({
-      where: { id: requisitionAJour.etablissementDemandeurId },
-    });
-    pasEscalade = demandeurEtab?.type === "GAS_MOUGHATAA";
+  let pasEscalade = false;
+  if (!estException) {
+    pasEscalade = etabActuel.type === "GAS_MOUGHATAA";
+    if (etabActuel.type === "GAS_DRS") {
+      pasEscalade = demandeurEtab?.type === "GAS_MOUGHATAA";
+    }
   }
 
   if (pasEscalade) {
