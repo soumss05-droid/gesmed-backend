@@ -1,4 +1,5 @@
 const prisma = require("../config/prisma");
+const { recalculerStatutStock } = require("./stocks.controller");
 
 // POST /inventaires
 // Enregistre une session d'inventaire physique pour l'établissement actif
@@ -158,6 +159,11 @@ async function traiterEcartInventaire(req, res) {
       where: { produitId_etablissementId: { produitId: ligne.lot.produitId, etablissementId: ligne.lot.etablissementId } },
       data: { quantiteTotale: { increment: ligne.ecart } },
     });
+    // Le statut n'est jamais recalculé automatiquement par Prisma : sans cet
+    // appel, un stock resterait affiché "Rupture" même après un ajustement
+    // qui le remonte largement au-dessus du seuil.
+    await recalculerStatutStock(ligne.lot.produitId, ligne.lot.etablissementId);
+
     await prisma.mouvementStock.create({
       data: {
         lotId: ligne.lotId,

@@ -7,6 +7,57 @@ function calculerStatut(quantite, seuilMin, seuilMax) {
   return "NORMAL";
 }
 
+// Recalcule et enregistre le statut d'un stock à partir de sa quantité
+// actuelle et de ses seuils — à appeler systématiquement après TOUT
+// changement de quantiteTotale, pour que le statut ne reste jamais figé sur
+// une ancienne valeur (ex. "RUPTURE" qui persiste après une rentrée).
+//
+// Pour une formation sanitaire uniquement, les seuils eux-mêmes sont aussi
+// recalculés dynamiquement à partir de son propre CMM (0,5 mois pour le
+// seuil min, 3 mois pour le seuil max) — bien plus pertinent que le seuil
+// générique du produit, identique partout. Les autres niveaux (Moughataa,
+// DRS, CAMEC) gardent leurs seuils actuels : ils disposent déjà d'outils
+// plus fins (croisement, performance, commande suggérée). Tant qu'aucun
+// historique de dispensation n'existe encore (CMM = 0), on garde les seuils
+// par défaut du produit plutôt que 0/0, qui classerait à tort en "Surstock".
+async function recalculerStatutStock(produitId, etablissementId) {
+  const stock = await prisma.stock.findUnique({
+    where: { produitId_etablissementId: { produitId, etablissementId } },
+  });
+  if (!stock) return null;
+
+  let seuilMin = stock.seuilMin;
+  let seuilMax = stock.seuilMax;
+
+  const etablissement = await prisma.etablissement.findUnique({
+    where: { id: etablissementId },
+    select: { type: true },
+  });
+
+  if (etablissement?.type === "FORMATION_SANITAIRE") {
+    const cmmMap = await cmmParProduit(etablissementId, "DISPENSATION");
+    const cmm = cmmMap[produitId] || 0;
+    if (cmm > 0) {
+      seuilMin = Math.round(cmm * 0.5);
+      seuilMax = Math.round(cmm * 3);
+    } else {
+      const produit = await prisma.produit.findUnique({
+        where: { id: produitId },
+        select: { seuilMinDefaut: true, seuilMaxDefaut: true },
+      });
+      seuilMin = produit?.seuilMinDefaut ?? stock.seuilMin;
+      seuilMax = produit?.seuilMaxDefaut ?? stock.seuilMax;
+    }
+  }
+
+  const statut = calculerStatut(stock.quantiteTotale, seuilMin, seuilMax);
+  if (statut === stock.statut && seuilMin === stock.seuilMin && seuilMax === stock.seuilMax) return stock;
+  return prisma.stock.update({
+    where: { produitId_etablissementId: { produitId, etablissementId } },
+    data: { seuilMin, seuilMax, statut },
+  });
+}
+
 // GET /stocks
 // Retourne les stocks de l'établissement connecté, avec les lots associés
 // triés en FEFO (date de péremption la plus proche en premier).
@@ -191,14 +242,25 @@ async function entreeStock(req, res) {
     where: { produitId_etablissementId: { produitId, etablissementId } },
   });
 
-  const stockMisAJour = stockExistant
-    ? await prisma.stock.update({
-        where: { produitId_etablissementId: { produitId, etablissementId } },
-        data: { quantiteTotale: { increment: Number(quantite) } },
-      })
-    : await prisma.stock.create({
-        data: { produitId, etablissementId, quantiteTotale: Number(quantite), seuilMin: 0, seuilMax: 0, statut: "NORMAL" },
-      });
+  if (stockExistant) {
+    await prisma.stock.update({
+      where: { produitId_etablissementId: { produitId, etablissementId } },
+      data: { quantiteTotale: { increment: Number(quantite) } },
+    });
+  } else {
+    const produit = await prisma.produit.findUnique({ where: { id: produitId } });
+    await prisma.stock.create({
+      data: {
+        produitId,
+        etablissementId,
+        quantiteTotale: Number(quantite),
+        seuilMin: produit?.seuilMinDefaut ?? 0,
+        seuilMax: produit?.seuilMaxDefaut ?? 0,
+        statut: "RUPTURE", // recalculé juste en dessous, valeur de départ neutre
+      },
+    });
+  }
+  const stockMisAJour = await recalculerStatutStock(produitId, etablissementId);
 
   await prisma.mouvementStock.create({
     data: { lotId: lot.id, type: "ENTREE", quantite: Number(quantite), referenceType: "MANUEL", utilisateurId },
@@ -239,6 +301,7 @@ async function enregistrerDispensation(req, res) {
     where: { produitId_etablissementId: { produitId, etablissementId } },
     data: { quantiteTotale: { decrement: Number(quantite) } },
   });
+  await recalculerStatutStock(produitId, etablissementId);
 
   return res.status(201).json({ message: "Dispensation enregistrée." });
 }
@@ -578,9 +641,9 @@ async function croisementStock(req, res) {
 // différentes qui finiraient par diverger. `null` signifie "pas de filtre"
 // (vue nationale, réservée à ADMIN/AUDITEUR).
 async function perimetreEtablissementIds(etablissementId, role) {
-  const etablissement = await prisma.etablissement.findUnique({ where: { id: etablissementId } });
-
   if (role === "ADMIN" || role === "AUDITEUR") return null;
+
+  const etablissement = await prisma.etablissement.findUnique({ where: { id: etablissementId } });
 
   if (role === "GESTIONNAIRE_CAMEC") {
     const etabs = await prisma.etablissement.findMany({
@@ -628,6 +691,67 @@ async function perimetreEtablissementIds(etablissementId, role) {
   return [etablissementId];
 }
 
+// GET /stocks/performance-moughataa?produitId=xxx
+// Indicateur de performance de gestion : compare, pour chaque Moughataa du
+// périmètre, ce qu'elle a elle-même distribué (son DMM) à ce que ses
+// formations sanitaires ont réellement consommé (la somme de leurs CMM). En
+// théorie, bien gérés, ces deux chiffres convergent — un écart persistant
+// signale soit un sous-approvisionnement chronique, soit un problème de
+// dimensionnement. Réservé au GAS DRS/Directeur DRS (sa région) et à
+// l'Admin (vue nationale).
+async function performanceMoughataa(req, res) {
+  const { etablissementId, role } = req.utilisateur;
+  const { produitId } = req.query;
+
+  if (!produitId) {
+    return res.status(400).json({ erreur: "produitId requis." });
+  }
+
+  const etablissement = await prisma.etablissement.findUnique({ where: { id: etablissementId } });
+
+  let moughataas;
+  if (role === "ADMIN") {
+    moughataas = await prisma.etablissement.findMany({
+      where: { type: "GAS_MOUGHATAA" },
+      include: { moughataa: true },
+    });
+  } else if (role === "GESTIONNAIRE_DRS" || role === "DIRECTEUR_DRS") {
+    moughataas = await prisma.etablissement.findMany({
+      where: { type: "GAS_MOUGHATAA", drsId: etablissement.drsId },
+      include: { moughataa: true },
+    });
+  } else {
+    return res.status(403).json({ erreur: "Cette vue n'est pas disponible pour ton rôle." });
+  }
+
+  const resultat = [];
+  for (const m of moughataas) {
+    const dmmMap = await cmmParProduit(m.id, "BL");
+    const dmm = dmmMap[produitId] || 0;
+
+    const formationsSanitaires = await prisma.etablissement.findMany({
+      where: { type: "FORMATION_SANITAIRE", moughataaId: m.moughataaId },
+    });
+
+    let sommeCmmFs = 0;
+    for (const fs of formationsSanitaires) {
+      const cmmFsMap = await cmmParProduit(fs.id, "DISPENSATION");
+      sommeCmmFs += cmmFsMap[produitId] || 0;
+    }
+
+    resultat.push({
+      nom: m.moughataa?.nom || m.nom,
+      dmm,
+      sommeCmmFs,
+      ecart: Math.round((dmm - sommeCmmFs) * 100) / 100,
+    });
+  }
+
+  resultat.sort((a, b) => Math.abs(b.ecart) - Math.abs(a.ecart));
+
+  return res.json(resultat);
+}
+
 module.exports = {
   listerStocks,
   calculerStatut,
@@ -640,4 +764,7 @@ module.exports = {
   commandeSuggeree,
   croisementStock,
   perimetreEtablissementIds,
+  recalculerStatutStock,
+  cmmParProduit,
+  performanceMoughataa,
 };

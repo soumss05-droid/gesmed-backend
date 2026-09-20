@@ -19,6 +19,7 @@ const {
   listerMoughataa,
   listerTousLesLots,
   supprimerDrs,
+  recalculerTousLesStatutsStock,
 } = require("../controllers/admin.controller");
 
 const router = express.Router();
@@ -50,5 +51,7 @@ router.get("/notifications", listerToutesNotifications);
 router.get("/moughataa", listerMoughataa);
 
 router.get("/stocks", listerTousLesLots);
+
+router.post("/recalculer-statuts-stock", recalculerTousLesStatutsStock);
 
 module.exports = router;

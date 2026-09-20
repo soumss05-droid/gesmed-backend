@@ -1,5 +1,6 @@
 const prisma = require("../config/prisma");
 const { executerValidationOuModification, ErreurMetier } = require("./requisitions.controller");
+const { recalculerStatutStock } = require("./stocks.controller");
 
 // GET /distribution/pretes
 // Réquisitions dont il reste un reliquat à envoyer depuis l'établissement
@@ -93,17 +94,32 @@ async function confirmerReception(req, res) {
     const ecart = ligneBl.quantiteEnvoyee - ligneRecue.quantiteRecue;
 
     if (ecart === 0) {
-      await prisma.stock.upsert({
+      const stockExistant = await prisma.stock.findUnique({
         where: { produitId_etablissementId: { produitId: ligneBl.produitId, etablissementId } },
-        update: { quantiteTotale: { increment: ligneRecue.quantiteRecue } },
-        create: {
-          produitId: ligneBl.produitId,
-          etablissementId,
-          quantiteTotale: ligneRecue.quantiteRecue,
-          seuilMin: 0,
-          seuilMax: 0,
-        },
       });
+
+      if (stockExistant) {
+        await prisma.stock.update({
+          where: { produitId_etablissementId: { produitId: ligneBl.produitId, etablissementId } },
+          data: { quantiteTotale: { increment: ligneRecue.quantiteRecue } },
+        });
+      } else {
+        const produit = await prisma.produit.findUnique({ where: { id: ligneBl.produitId } });
+        await prisma.stock.create({
+          data: {
+            produitId: ligneBl.produitId,
+            etablissementId,
+            quantiteTotale: ligneRecue.quantiteRecue,
+            seuilMin: produit?.seuilMinDefaut ?? 0,
+            seuilMax: produit?.seuilMaxDefaut ?? 0,
+            statut: "RUPTURE", // recalculé juste en dessous, valeur de départ neutre
+          },
+        });
+      }
+      // Le statut n'est jamais recalculé automatiquement par Prisma : sans
+      // cet appel, un stock resterait affiché "Rupture" même après une
+      // réception qui le remonte largement au-dessus du seuil.
+      await recalculerStatutStock(ligneBl.produitId, etablissementId);
 
       const nouveauLot = await prisma.lot.create({
         data: {

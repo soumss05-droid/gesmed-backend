@@ -1,5 +1,5 @@
 const prisma = require("../config/prisma");
-const { selectionnerLotFEFO, calculerCommandeSuggereePourEtablissement } = require("./stocks.controller");
+const { selectionnerLotFEFO, calculerCommandeSuggereePourEtablissement, recalculerStatutStock } = require("./stocks.controller");
 
 const ORDRE_CIRCUIT = [
   "FORMATION_SANITAIRE",
@@ -237,6 +237,7 @@ async function executerValidationOuModification({ etablissementId, utilisateurId
         where: { produitId_etablissementId: { produitId: ligne.produitId, etablissementId } },
         data: { quantiteTotale: { decrement: aLivrer } },
       });
+      await recalculerStatutStock(ligne.produitId, etablissementId);
     }
 
     // Alerte de rupture : uniquement quand c'est la CAMEC qui vient de

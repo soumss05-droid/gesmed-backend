@@ -1,4 +1,5 @@
 const prisma = require("../config/prisma");
+const { recalculerStatutStock } = require("./stocks.controller");
 
 // GET /ecarts/en-attente
 // Réservé aux rôles GAS_PROGRAMME_NATIONAL et AUDITEUR (vérifié par le middleware autoriser).
@@ -50,17 +51,32 @@ async function traiterEcart(req, res) {
     // Débloquer met à jour le stock du destinataire avec la quantité
     // réellement reçue, en reprenant le vrai numéro de lot et la vraie date
     // de péremption du lot d'origine expédié.
-    await prisma.stock.upsert({
+    const stockExistant = await prisma.stock.findUnique({
       where: { produitId_etablissementId: { produitId: ligne.produitId, etablissementId } },
-      update: { quantiteTotale: { increment: ligne.quantiteRecue } },
-      create: {
-        produitId: ligne.produitId,
-        etablissementId,
-        quantiteTotale: ligne.quantiteRecue,
-        seuilMin: 0,
-        seuilMax: 0,
-      },
     });
+
+    if (stockExistant) {
+      await prisma.stock.update({
+        where: { produitId_etablissementId: { produitId: ligne.produitId, etablissementId } },
+        data: { quantiteTotale: { increment: ligne.quantiteRecue } },
+      });
+    } else {
+      const produit = await prisma.produit.findUnique({ where: { id: ligne.produitId } });
+      await prisma.stock.create({
+        data: {
+          produitId: ligne.produitId,
+          etablissementId,
+          quantiteTotale: ligne.quantiteRecue,
+          seuilMin: produit?.seuilMinDefaut ?? 0,
+          seuilMax: produit?.seuilMaxDefaut ?? 0,
+          statut: "RUPTURE", // recalculé juste en dessous, valeur de départ neutre
+        },
+      });
+    }
+    // Le statut n'est jamais recalculé automatiquement par Prisma : sans cet
+    // appel, un stock resterait affiché "Rupture" même après un déblocage
+    // qui le remonte largement au-dessus du seuil.
+    await recalculerStatutStock(ligne.produitId, etablissementId);
 
     const nouveauLot = await prisma.lot.create({
       data: {

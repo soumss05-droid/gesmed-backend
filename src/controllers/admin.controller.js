@@ -1,5 +1,6 @@
 const prisma = require("../config/prisma");
 const { hashPassword } = require("../utils/hash");
+const { recalculerStatutStock } = require("./stocks.controller");
 
 // Rôles rattachables à un établissement (l'Admin système, lui, n'est pas un
 // rôle de cette liste : c'est le booléen estAdminSysteme sur Utilisateur,
@@ -280,7 +281,15 @@ async function listerTousLesLots(req, res) {
     where: { quantite: { gt: 0 } },
     include: {
       produit: { select: { id: true, nom: true } },
-      etablissement: { select: { id: true, nom: true, type: true } },
+      etablissement: {
+        select: {
+          id: true,
+          nom: true,
+          type: true,
+          drs: { select: { nom: true } },
+          moughataa: { select: { nom: true, drs: { select: { nom: true } } } },
+        },
+      },
     },
     orderBy: { datePeremption: "asc" },
   });
@@ -310,6 +319,33 @@ async function supprimerDrs(req, res) {
   }
 }
 
+// POST /admin/recalculer-statuts-stock
+// Correction unique, à lancer une seule fois : recalcule le statut (rupture,
+// sous seuil, normal, surstock) de TOUS les stocks existants en base, à
+// partir de leur quantité et de leurs seuils réels. Nécessaire car un bug
+// désormais corrigé empêchait le statut d'être recalculé après un
+// changement de quantité — certains stocks anciens sont donc restés figés
+// sur une valeur périmée (ex. "Rupture" malgré une quantité largement
+// positive). Les futurs changements de stock, eux, se corrigent déjà tout
+// seuls via recalculerStatutStock, appelée à chaque mouvement.
+async function recalculerTousLesStatutsStock(req, res) {
+  const stocks = await prisma.stock.findMany();
+
+  let corriges = 0;
+  for (const stock of stocks) {
+    const avant = { statut: stock.statut, seuilMin: stock.seuilMin, seuilMax: stock.seuilMax };
+    const apres = await recalculerStatutStock(stock.produitId, stock.etablissementId);
+    if (
+      apres &&
+      (apres.statut !== avant.statut || apres.seuilMin !== avant.seuilMin || apres.seuilMax !== avant.seuilMax)
+    ) {
+      corriges += 1;
+    }
+  }
+
+  return res.json({ message: `Correction terminée : ${corriges} stock(s) corrigé(s) sur ${stocks.length} au total.` });
+}
+
 module.exports = {
   listerDrs,
   creerDrs,
@@ -328,4 +364,5 @@ module.exports = {
   listerMoughataa,
   listerTousLesLots,
   supprimerDrs,
+  recalculerTousLesStatutsStock,
 };
