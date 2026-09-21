@@ -148,16 +148,116 @@ async function stockReseau(req, res) {
   const { etablissementId, role } = req.utilisateur;
   const etablissement = await prisma.etablissement.findUnique({ where: { id: etablissementId } });
 
+  // Vue CAMEC : cas particulier — chaque ligne représente une région
+  // entière (dépôt DRS + tous ses Moughataa + toutes leurs formations
+  // sanitaires, additionnés), pas seulement le dépôt DRS lui-même. C'est la
+  // seule vue de cet écran qui agrège plusieurs établissements en une seule
+  // ligne plutôt que d'en lister un par un — la CAMEC raisonne région par
+  // région, pas établissement par établissement.
+  if (role === "GESTIONNAIRE_CAMEC") {
+    const toutesLesDrs = await prisma.drs.findMany({ orderBy: { nom: "asc" } });
+    const resultatCamec = [];
+
+    // Ligne 0 : le dépôt CAMEC lui-même, comme pour les autres rôles.
+    const stocksCamec = await prisma.stock.findMany({
+      where: { etablissementId },
+      include: { produit: true },
+    });
+    const maintenant = new Date();
+    const lotsPerimesCamec = await prisma.lot.findMany({
+      where: { etablissementId, quantite: { gt: 0 }, datePeremption: { lt: maintenant } },
+      include: { produit: true },
+    });
+    resultatCamec.push({
+      etablissementId,
+      etablissementNom: etablissement.nom,
+      type: "CAMEC",
+      regionNom: null,
+      moughataaNom: null,
+      stocks: stocksCamec.map((s) => ({
+        produitId: s.produitId,
+        produit: s.produit.nom,
+        quantiteTotale: s.quantiteTotale,
+        statut: s.statut,
+      })),
+      lotsPerimes: lotsPerimesCamec.map((l) => ({
+        produit: l.produit.nom,
+        numeroLot: l.numeroLot,
+        datePeremption: l.datePeremption,
+        quantite: l.quantite,
+      })),
+    });
+
+    // Une ligne par région : tous les établissements de la région
+    // (dépôt DRS + Moughataa + FS) additionnés en un seul total par produit.
+    for (const drs of toutesLesDrs) {
+      const moughataasRegion = await prisma.moughataa.findMany({ where: { drsId: drs.id }, select: { id: true } });
+      const moughataaIds = moughataasRegion.map((m) => m.id);
+      const etabsRegion = await prisma.etablissement.findMany({
+        where: {
+          OR: [
+            { type: "GAS_DRS", drsId: drs.id },
+            { type: "GAS_MOUGHATAA", drsId: drs.id },
+            { type: "FORMATION_SANITAIRE", moughataaId: { in: moughataaIds } },
+          ],
+        },
+        select: { id: true },
+      });
+      const etabRegionIds = etabsRegion.map((e) => e.id);
+      if (etabRegionIds.length === 0) continue;
+
+      const stocksRegion = await prisma.stock.findMany({
+        where: { etablissementId: { in: etabRegionIds } },
+        include: { produit: true },
+      });
+      const lotsPerimesRegion = await prisma.lot.findMany({
+        where: { etablissementId: { in: etabRegionIds }, quantite: { gt: 0 }, datePeremption: { lt: maintenant } },
+        include: { produit: true },
+      });
+
+      const totauxParProduit = {};
+      for (const s of stocksRegion) {
+        if (!totauxParProduit[s.produitId]) totauxParProduit[s.produitId] = { produit: s.produit.nom, quantiteTotale: 0 };
+        totauxParProduit[s.produitId].quantiteTotale += s.quantiteTotale;
+      }
+
+      resultatCamec.push({
+        etablissementId: drs.id,
+        etablissementNom: drs.nom,
+        type: "GAS_DRS",
+        regionNom: drs.nom,
+        moughataaNom: null,
+        stocks: Object.entries(totauxParProduit).map(([produitId, v]) => ({
+          produitId,
+          produit: v.produit,
+          quantiteTotale: v.quantiteTotale,
+          statut: null, // Agrégat régional : pas de seuil unique applicable, pas de badge de statut.
+        })),
+        lotsPerimes: lotsPerimesRegion.map((l) => ({
+          produit: l.produit.nom,
+          numeroLot: l.numeroLot,
+          datePeremption: l.datePeremption,
+          quantite: l.quantite,
+        })),
+      });
+    }
+
+    return res.json(resultatCamec);
+  }
+
   let etablissementsCibles = [];
+  const inclureHierarchie = { moughataa: { include: { drs: true } }, drs: true };
 
   if (role === "ADMIN") {
-    etablissementsCibles = await prisma.etablissement.findMany({ orderBy: { nom: "asc" } });
-  } else if (role === "GESTIONNAIRE_CAMEC") {
     etablissementsCibles = await prisma.etablissement.findMany({
-      where: { OR: [{ id: etablissementId }, { type: "GAS_DRS" }] },
+      orderBy: { nom: "asc" },
+      include: inclureHierarchie,
     });
   } else if (role === "GAS_PROGRAMME_NATIONAL") {
-    etablissementsCibles = await prisma.etablissement.findMany({ where: { type: "GAS_DRS" } });
+    etablissementsCibles = await prisma.etablissement.findMany({
+      where: { type: "GAS_DRS" },
+      include: inclureHierarchie,
+    });
   } else if (role === "GESTIONNAIRE_DRS" || role === "DIRECTEUR_DRS") {
     const moughataasRegion = await prisma.moughataa.findMany({
       where: { drsId: etablissement.drsId },
@@ -172,6 +272,7 @@ async function stockReseau(req, res) {
           { type: "FORMATION_SANITAIRE", moughataaId: { in: moughataaIds } },
         ],
       },
+      include: inclureHierarchie,
     });
   } else if (role === "GAS_MOUGHATAA" || role === "MEDECIN_CHEF_MOUGHATAA") {
     etablissementsCibles = await prisma.etablissement.findMany({
@@ -181,6 +282,7 @@ async function stockReseau(req, res) {
           { type: "FORMATION_SANITAIRE", moughataaId: etablissement.moughataaId },
         ],
       },
+      include: inclureHierarchie,
     });
   } else {
     return res.status(403).json({ erreur: "Cette vue n'est pas disponible pour ton rôle." });
@@ -218,9 +320,34 @@ async function stockReseau(req, res) {
     include: { produit: true },
   });
 
+  // Nom d'affichage propre : "Moughataa Arafat" plutôt que "GAS Moughataa
+  // Arafat" (le nom de l'établissement lui-même, qui peut différer du nom
+  // de la Moughataa qu'il représente) ; le nom complet de la DRS pour un
+  // GAS DRS (déjà au format "DRS Nouakchott Nord", pas besoin de préfixe).
+  function nomAffichage(etab) {
+    if (etab.type === "GAS_MOUGHATAA" && etab.moughataa?.nom) return `Moughataa ${etab.moughataa.nom}`;
+    if (etab.type === "GAS_DRS" && etab.drs?.nom) return etab.drs.nom;
+    return etab.nom;
+  }
+
+  // Clés de regroupement pour le filtrage en cascade côté frontend (région
+  // puis Moughataa) — remonte via la Moughataa quand l'établissement n'a
+  // pas de lien direct vers sa DRS (cas d'un GAS Moughataa ou d'une FS).
+  function nomRegion(etab) {
+    if (etab.type === "GAS_DRS") return etab.drs?.nom || null;
+    return etab.moughataa?.drs?.nom || null;
+  }
+  function nomMoughataaGroupe(etab) {
+    if (etab.type === "GAS_MOUGHATAA" || etab.type === "FORMATION_SANITAIRE") return etab.moughataa?.nom || null;
+    return null;
+  }
+
   const resultat = etablissementsCibles.map((etab) => ({
     etablissementId: etab.id,
-    etablissementNom: etab.nom,
+    etablissementNom: nomAffichage(etab),
+    type: etab.type,
+    regionNom: nomRegion(etab),
+    moughataaNom: nomMoughataaGroupe(etab),
     stocks: stocks
       .filter((s) => s.etablissementId === etab.id)
       .map((s) => ({
