@@ -683,10 +683,19 @@ async function commandeSuggeree(req, res) {
 // Renvoie aussi le total, pour afficher le "stock total" du niveau.
 async function croisementStock(req, res) {
   const { etablissementId, role } = req.utilisateur;
-  const { produitId, regroupement } = req.query;
+  const { produitId, produitIds, regroupement } = req.query;
 
-  if (!produitId) {
-    return res.status(400).json({ erreur: "produitId requis." });
+  // Accepte soit un seul produitId (historique), soit plusieurs produitIds
+  // séparés par des virgules — dans ce cas, les quantités des produits
+  // sélectionnés sont additionnées par établissement avant regroupement.
+  const listeProduits = produitIds
+    ? produitIds.split(",").map((p) => p.trim()).filter(Boolean)
+    : produitId
+    ? [produitId]
+    : [];
+
+  if (listeProduits.length === 0) {
+    return res.status(400).json({ erreur: "Au moins un produit est requis." });
   }
 
   const etablissement = await prisma.etablissement.findUnique({ where: { id: etablissementId } });
@@ -701,9 +710,10 @@ async function croisementStock(req, res) {
     regroupementsAutorises = ["drs", "moughataa", "formationsanitaire"];
   } else if (role === "GAS_PROGRAMME_NATIONAL") {
     // Vue nationale, mais limitée aux produits de son propre programme.
-    const produit = await prisma.produit.findUnique({ where: { id: produitId } });
-    if (!produit || produit.programmeId !== etablissement.programmeId) {
-      return res.status(403).json({ erreur: "Ce produit n'appartient pas à ton programme." });
+    const produitsChoisis = await prisma.produit.findMany({ where: { id: { in: listeProduits } } });
+    const horsProgramme = produitsChoisis.find((p) => p.programmeId !== etablissement.programmeId);
+    if (produitsChoisis.length !== listeProduits.length || horsProgramme) {
+      return res.status(403).json({ erreur: "Un ou plusieurs produits sélectionnés n'appartiennent pas à ton programme." });
     }
     etablissementsCibles = await prisma.etablissement.findMany({
       where: { type: { in: ["GAS_DRS", "GAS_MOUGHATAA", "FORMATION_SANITAIRE"] } },
@@ -748,42 +758,46 @@ async function croisementStock(req, res) {
 
   const etablissementIds = etablissementsCibles.map((e) => e.id);
   const stocks = await prisma.stock.findMany({
-    where: { etablissementId: { in: etablissementIds }, produitId },
+    where: { etablissementId: { in: etablissementIds }, produitId: { in: listeProduits } },
   });
+
+  // Additionne les quantités de TOUS les produits sélectionnés pour un même
+  // établissement — un établissement peut avoir jusqu'à listeProduits.length
+  // lignes de stock désormais, une par produit choisi.
+  function quantiteEtab(etabId) {
+    return stocks.filter((s) => s.etablissementId === etabId).reduce((acc, s) => acc + s.quantiteTotale, 0);
+  }
 
   let lignes;
   if (regroupementFinal === "drs") {
     const totaux = {};
     for (const etab of etablissementsCibles) {
-      const stock = stocks.find((s) => s.etablissementId === etab.id);
-      if (!stock) continue;
+      const quantite = quantiteEtab(etab.id);
+      if (quantite === 0 && !stocks.some((s) => s.etablissementId === etab.id)) continue;
       const cle = etab.type === "GAS_DRS" ? etab.nom : etab.moughataa?.drs?.nom;
       if (!cle) continue;
-      totaux[cle] = (totaux[cle] || 0) + stock.quantiteTotale;
+      totaux[cle] = (totaux[cle] || 0) + quantite;
     }
     lignes = Object.entries(totaux).map(([nom, quantite]) => ({ nom, quantite }));
   } else if (regroupementFinal === "moughataa") {
     const totaux = {};
     for (const etab of etablissementsCibles) {
-      const stock = stocks.find((s) => s.etablissementId === etab.id);
-      if (!stock) continue;
+      const quantite = quantiteEtab(etab.id);
+      if (quantite === 0 && !stocks.some((s) => s.etablissementId === etab.id)) continue;
       // Toujours regrouper sous le nom de la Moughataa elle-même (jamais le
       // nom de l'établissement GAS Moughataa, qui peut différer) — sinon le
       // dépôt et ses formations sanitaires se retrouvent scindés en deux
       // lignes distinctes pour la même Moughataa.
       const cle = etab.moughataa?.nom;
       if (!cle) continue;
-      totaux[cle] = (totaux[cle] || 0) + stock.quantiteTotale;
+      totaux[cle] = (totaux[cle] || 0) + quantite;
     }
     lignes = Object.entries(totaux).map(([nom, quantite]) => ({ nom, quantite }));
   } else {
-    lignes = etablissementsCibles.map((etab) => {
-      const stock = stocks.find((s) => s.etablissementId === etab.id);
-      return {
-        nom: etab.type === "GAS_MOUGHATAA" ? `Dépôt ${etab.nom}` : etab.nom,
-        quantite: stock ? stock.quantiteTotale : 0,
-      };
-    });
+    lignes = etablissementsCibles.map((etab) => ({
+      nom: etab.type === "GAS_MOUGHATAA" ? `Dépôt ${etab.nom}` : etab.nom,
+      quantite: quantiteEtab(etab.id),
+    }));
   }
 
   lignes.sort((a, b) => b.quantite - a.quantite);
@@ -859,10 +873,7 @@ async function perimetreEtablissementIds(etablissementId, role) {
 async function performanceMoughataa(req, res) {
   const { etablissementId, role } = req.utilisateur;
   const { produitId } = req.query;
-
-  if (!produitId) {
-    return res.status(400).json({ erreur: "produitId requis." });
-  }
+  const modeGlobal = !produitId;
 
   const etablissement = await prisma.etablissement.findUnique({ where: { id: etablissementId } });
 
@@ -881,10 +892,17 @@ async function performanceMoughataa(req, res) {
     return res.status(403).json({ erreur: "Cette vue n'est pas disponible pour ton rôle." });
   }
 
+  // Somme toutes les valeurs de la carte CMM (tous produits confondus) en
+  // mode global, ou prend juste le produit choisi en mode détaillé.
+  function extraireValeur(map) {
+    if (modeGlobal) return Object.values(map).reduce((acc, v) => acc + v, 0);
+    return map[produitId] || 0;
+  }
+
   const resultat = [];
   for (const m of moughataas) {
     const dmmMap = await cmmParProduit(m.id, "BL");
-    const dmm = dmmMap[produitId] || 0;
+    const dmm = extraireValeur(dmmMap);
 
     const formationsSanitaires = await prisma.etablissement.findMany({
       where: { type: "FORMATION_SANITAIRE", moughataaId: m.moughataaId },
@@ -893,20 +911,20 @@ async function performanceMoughataa(req, res) {
     let sommeCmmFs = 0;
     for (const fs of formationsSanitaires) {
       const cmmFsMap = await cmmParProduit(fs.id, "DISPENSATION");
-      sommeCmmFs += cmmFsMap[produitId] || 0;
+      sommeCmmFs += extraireValeur(cmmFsMap);
     }
 
     resultat.push({
       nom: m.moughataa?.nom || m.nom,
-      dmm,
-      sommeCmmFs,
+      dmm: Math.round(dmm * 100) / 100,
+      sommeCmmFs: Math.round(sommeCmmFs * 100) / 100,
       ecart: Math.round((dmm - sommeCmmFs) * 100) / 100,
     });
   }
 
   resultat.sort((a, b) => Math.abs(b.ecart) - Math.abs(a.ecart));
 
-  return res.json(resultat);
+  return res.json({ mode: modeGlobal ? "global" : "produit", lignes: resultat });
 }
 
 module.exports = {
