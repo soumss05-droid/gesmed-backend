@@ -1,6 +1,6 @@
 const prisma = require("../config/prisma");
 const { executerValidationOuModification, ErreurMetier } = require("./requisitions.controller");
-const { recalculerStatutStock } = require("./stocks.controller");
+const { recalculerStatutStock, creerOuIncrementerLot } = require("./stocks.controller");
 
 // GET /distribution/pretes
 // Réquisitions dont il reste un reliquat à envoyer depuis l'établissement
@@ -121,14 +121,12 @@ async function confirmerReception(req, res) {
       // réception qui le remonte largement au-dessus du seuil.
       await recalculerStatutStock(ligneBl.produitId, etablissementId);
 
-      const nouveauLot = await prisma.lot.create({
-        data: {
-          produitId: ligneBl.produitId,
-          etablissementId,
-          numeroLot: ligneBl.lot.numeroLot,
-          datePeremption: ligneBl.lot.datePeremption,
-          quantite: ligneRecue.quantiteRecue,
-        },
+      const nouveauLot = await creerOuIncrementerLot({
+        produitId: ligneBl.produitId,
+        etablissementId,
+        numeroLot: ligneBl.lot.numeroLot,
+        datePeremption: ligneBl.lot.datePeremption,
+        quantite: ligneRecue.quantiteRecue,
       });
 
       await prisma.mouvementStock.create({

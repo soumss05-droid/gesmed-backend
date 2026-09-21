@@ -1,5 +1,5 @@
 const prisma = require("../config/prisma");
-const { recalculerStatutStock } = require("./stocks.controller");
+const { recalculerStatutStock, creerOuIncrementerLot } = require("./stocks.controller");
 
 // GET /ecarts/en-attente
 // Réservé aux rôles GAS_PROGRAMME_NATIONAL et AUDITEUR (vérifié par le middleware autoriser).
@@ -78,14 +78,12 @@ async function traiterEcart(req, res) {
     // qui le remonte largement au-dessus du seuil.
     await recalculerStatutStock(ligne.produitId, etablissementId);
 
-    const nouveauLot = await prisma.lot.create({
-      data: {
-        produitId: ligne.produitId,
-        etablissementId,
-        numeroLot: ligne.lot.numeroLot,
-        datePeremption: ligne.lot.datePeremption,
-        quantite: ligne.quantiteRecue,
-      },
+    const nouveauLot = await creerOuIncrementerLot({
+      produitId: ligne.produitId,
+      etablissementId,
+      numeroLot: ligne.lot.numeroLot,
+      datePeremption: ligne.lot.datePeremption,
+      quantite: ligne.quantiteRecue,
     });
 
     await prisma.mouvementStock.create({

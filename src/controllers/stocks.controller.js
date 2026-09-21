@@ -58,6 +58,36 @@ async function recalculerStatutStock(produitId, etablissementId) {
   });
 }
 
+// Crée un lot chez le destinataire d'une réception (réplique du lot
+// d'origine expédié) — ou, s'il existe déjà un lot avec ce même numéro chez
+// cet établissement (cas fréquent : un même lot source livré à plusieurs
+// reprises au même destinataire), augmente simplement sa quantité au lieu
+// d'en créer un doublon, ce qui violerait la règle d'unicité (un numéro de
+// lot est unique par établissement, sa péremption invariante). Sans cette
+// vérification, la deuxième réception d'un même lot échouait avec une
+// erreur de contrainte non gérée.
+async function creerOuIncrementerLot({ produitId, etablissementId, numeroLot, datePeremption, quantite }) {
+  const lotExistant = await prisma.lot.findUnique({
+    where: { etablissementId_numeroLot: { etablissementId, numeroLot } },
+  });
+
+  if (lotExistant) {
+    if (lotExistant.produitId !== produitId) {
+      throw new Error(
+        `Le numéro de lot "${numeroLot}" est déjà utilisé pour un autre produit à cet établissement.`
+      );
+    }
+    return prisma.lot.update({
+      where: { id: lotExistant.id },
+      data: { quantite: { increment: quantite } },
+    });
+  }
+
+  return prisma.lot.create({
+    data: { produitId, etablissementId, numeroLot, datePeremption, quantite },
+  });
+}
+
 // GET /stocks
 // Retourne les stocks de l'établissement connecté, avec les lots associés
 // triés en FEFO (date de péremption la plus proche en premier).
@@ -767,4 +797,5 @@ module.exports = {
   recalculerStatutStock,
   cmmParProduit,
   performanceMoughataa,
+  creerOuIncrementerLot,
 };

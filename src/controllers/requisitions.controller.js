@@ -1,5 +1,5 @@
 const prisma = require("../config/prisma");
-const { selectionnerLotFEFO, calculerCommandeSuggereePourEtablissement, recalculerStatutStock } = require("./stocks.controller");
+const { selectionnerLotFEFO, calculerCommandeSuggereePourEtablissement, recalculerStatutStock, creerOuIncrementerLot } = require("./stocks.controller");
 
 const ORDRE_CIRCUIT = [
   "FORMATION_SANITAIRE",
@@ -253,14 +253,12 @@ async function livrerEnCascadeException({ etablissementCamecId, etablissementFin
         }
         await recalculerStatutStock(lb.produitId, hop.versId);
 
-        const nouveauLot = await prisma.lot.create({
-          data: {
-            produitId: lb.produitId,
-            etablissementId: hop.versId,
-            numeroLot: lb.lot.numeroLot,
-            datePeremption: lb.lot.datePeremption,
-            quantite: lb.quantiteEnvoyee,
-          },
+        const nouveauLot = await creerOuIncrementerLot({
+          produitId: lb.produitId,
+          etablissementId: hop.versId,
+          numeroLot: lb.lot.numeroLot,
+          datePeremption: lb.lot.datePeremption,
+          quantite: lb.quantiteEnvoyee,
         });
         await prisma.mouvementStock.create({
           data: {
@@ -458,8 +456,8 @@ async function executerValidationOuModification({ etablissementId, utilisateurId
         type: typeNotif,
         message:
           decision === "modifier"
-            ? "Ta réquisition a été modifiée puis entièrement livrée."
-            : "Ta réquisition a été validée et entièrement livrée.",
+            ? `La réquisition N°${requisitionAJour.numero} a été modifiée et entièrement livrée.`
+            : `La réquisition N°${requisitionAJour.numero} a été validée et entièrement livrée.`,
         requisitionId,
       });
     }
@@ -501,8 +499,8 @@ async function executerValidationOuModification({ etablissementId, utilisateurId
         type: typeNotif,
         message:
           lignesALivrer.length > 0
-            ? "Ta réquisition a été livrée partiellement — le reste n'a pas pu être fourni pour l'instant."
-            : `Ta réquisition n'a pas pu être livrée : stock insuffisant au ${etabActuel.type === "GAS_MOUGHATAA" ? "GAS Moughataa" : "GAS DRS"}.`,
+            ? `La réquisition N°${requisitionAJour.numero} a été livrée partiellement — le reste n'a pas pu être fourni pour l'instant.`
+            : `La réquisition N°${requisitionAJour.numero} n'a pas pu être livrée : stock insuffisant au ${etabActuel.type === "GAS_MOUGHATAA" ? "GAS Moughataa" : "GAS DRS"}.`,
         requisitionId,
       });
     }
@@ -532,8 +530,8 @@ async function executerValidationOuModification({ etablissementId, utilisateurId
         type: typeNotif,
         message:
           decision === "modifier"
-            ? "Ta réquisition a été modifiée au dernier niveau du circuit."
-            : "Ta réquisition a été validée au dernier niveau du circuit.",
+            ? `La réquisition N°${requisitionAJour.numero} a été modifiée au dernier niveau du circuit.`
+            : `La réquisition N°${requisitionAJour.numero} a été validée au dernier niveau du circuit.`,
         requisitionId,
       });
     }
@@ -576,8 +574,8 @@ async function executerValidationOuModification({ etablissementId, utilisateurId
         type: typeNotif,
         message:
           decision === "modifier"
-            ? `Ta réquisition a été modifiée et transmise à ${seulGroupe.etablissement.nom}.`
-            : `Ta réquisition a été validée et transmise à ${seulGroupe.etablissement.nom}.`,
+            ? `La réquisition N°${requisitionAJour.numero} a été modifiée et transmise à ${seulGroupe.etablissement.nom}.`
+            : `La réquisition N°${requisitionAJour.numero} a été validée et transmise à ${seulGroupe.etablissement.nom}.`,
         requisitionId,
       });
     }
@@ -615,7 +613,7 @@ async function executerValidationOuModification({ etablissementId, utilisateurId
       etablissementId: etablissementPrecedent.id,
       etablissementAuteurId: etabActuel.id,
       type: "SCINDEE",
-      message: `Ta réquisition a été scindée en ${requisitionsFilles.length} réquisition(s), envoyée(s) à : ${nomsDestinations}.`,
+      message: `La réquisition N°${requisitionAJour.numero} a été scindée en ${requisitionsFilles.length} réquisition(s), envoyée(s) à : ${nomsDestinations}.`,
       requisitionId,
     });
   }
@@ -669,7 +667,7 @@ async function traiterDecision(req, res) {
       etablissementId: etablissementPrecedent.id,
       etablissementAuteurId: etabActuel.id,
       type: "REJETEE_POUR_CORRECTION",
-      message: `La réquisition envoyée au GAS Programme national a été rejetée et nécessite une correction.`,
+      message: `La réquisition N°${requisitionAvecLignes.numero} envoyée au GAS Programme national a été rejetée et nécessite une correction.`,
       requisitionId: id,
     });
 
@@ -802,6 +800,89 @@ async function creerCommandeReapprovisionnement(req, res) {
   return res.status(201).json({ requisitions: requisitionsCreees });
 }
 
+// Remonte à la racine de la famille d'une réquisition (elle a pu être
+// scindée), puis redescend récursivement pour récupérer toute la famille —
+// nécessaire pour la recherche par numéro, qui doit montrer le dossier
+// complet même si le numéro saisi est celui d'une réquisition fille.
+async function trouverFamilleRequisition(requisitionId) {
+  let racine = await prisma.requisition.findUnique({ where: { id: requisitionId } });
+  while (racine.requisitionParentId) {
+    racine = await prisma.requisition.findUnique({ where: { id: racine.requisitionParentId } });
+  }
+
+  const famille = [racine];
+  async function descendre(id) {
+    const enfants = await prisma.requisition.findMany({ where: { requisitionParentId: id } });
+    for (const enfant of enfants) {
+      famille.push(enfant);
+      await descendre(enfant.id);
+    }
+  }
+  await descendre(racine.id);
+  return famille;
+}
+
+// GET /requisitions/recherche/:numero
+// Retrouve le dossier complet (réquisition, ses éventuelles scissions, et
+// les BL liés) à partir du numéro. Accessible à tous les rôles, mais
+// limité aux dossiers qui concernent l'établissement connecté — sa propre
+// demande, un niveau qu'il a eu à traiter, ou un BL où il apparaît comme
+// expéditeur ou destinataire. Admin et Auditeur voient tout.
+async function rechercherParNumero(req, res) {
+  const { etablissementId, role } = req.utilisateur;
+  const numero = Number(req.params.numero);
+
+  if (!numero || Number.isNaN(numero)) {
+    return res.status(400).json({ erreur: "Numéro invalide." });
+  }
+
+  const cible = await prisma.requisition.findUnique({ where: { numero } });
+  if (!cible) {
+    return res.status(404).json({ erreur: "Aucune réquisition avec ce numéro." });
+  }
+
+  const famille = await trouverFamilleRequisition(cible.id);
+  const familleIds = famille.map((f) => f.id);
+
+  let autorise = role === "ADMIN" || role === "AUDITEUR";
+  if (!autorise) {
+    autorise = famille.some(
+      (f) => f.etablissementDemandeurId === etablissementId || f.niveauActuelId === etablissementId
+    );
+  }
+  if (!autorise) {
+    const blLie = await prisma.bordereauLivraison.findFirst({
+      where: {
+        requisitionId: { in: familleIds },
+        OR: [{ etablissementExpediteurId: etablissementId }, { etablissementDestinataireId: etablissementId }],
+      },
+    });
+    autorise = !!blLie;
+  }
+  if (!autorise) {
+    return res.status(403).json({ erreur: "Tu n'as pas accès à cette réquisition." });
+  }
+
+  const familleDetaillee = await prisma.requisition.findMany({
+    where: { id: { in: familleIds } },
+    include: {
+      lignes: { include: { produit: true } },
+      etablissementDemandeur: { select: { nom: true } },
+      niveauActuel: { select: { nom: true } },
+      bordereaux: {
+        include: {
+          lignes: { include: { produit: true } },
+          etablissementExpediteur: { select: { nom: true } },
+          etablissementDestinataire: { select: { nom: true } },
+        },
+      },
+    },
+    orderBy: { numero: "asc" },
+  });
+
+  return res.json(familleDetaillee);
+}
+
 module.exports = {
   creerRequisition,
   listerAValider,
@@ -810,4 +891,5 @@ module.exports = {
   creerCommandeReapprovisionnement,
   executerValidationOuModification,
   ErreurMetier,
+  rechercherParNumero,
 };

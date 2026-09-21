@@ -246,6 +246,7 @@ enum StatutRequisition {
 
 model Requisition {
   id                     String            @id @default(uuid())
+  numero                 Int               @unique @default(autoincrement())
   etablissementDemandeurId String          @map("etablissement_demandeur_id")
   etablissementDemandeur  Etablissement    @relation("RequisitionDemandeur", fields: [etablissementDemandeurId], references: [id])
   niveauActuelId         String            @map("niveau_actuel_id")
@@ -287,6 +288,7 @@ enum StatutBl {
 
 model BordereauLivraison {
   id                          String        @id @default(uuid())
+  numero                      Int           @unique @default(autoincrement())
   requisitionId               String        @map("requisition_id")
   requisition                 Requisition   @relation(fields: [requisitionId], references: [id])
   etablissementExpediteurId   String        @map("etablissement_expediteur_id")
