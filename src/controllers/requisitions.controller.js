@@ -377,10 +377,24 @@ async function executerValidationOuModification({ etablissementId, utilisateurId
       });
     } else {
       const lignesBl = [];
+      // Quantité réellement trouvée dans les lots physiques, par produit —
+      // peut être inférieure à aLivrer si le stock agrégé (quantiteTotale)
+      // s'est désynchronisé des lots réels (ex. données corrigées à la main,
+      // ancien bug de mouvement de stock). On ne décrémente jamais le stock
+      // au-delà de ce qui a été réellement prélevé, pour ne pas creuser
+      // davantage cet écart à chaque livraison.
+      const quantiteReelleParProduit = new Map();
       for (const { ligne, aLivrer } of lignesALivrer) {
-        const { lotsChoisis } = await selectionnerLotFEFO(ligne.produitId, etablissementId, aLivrer);
+        const { lotsChoisis, quantiteNonCouverte } = await selectionnerLotFEFO(ligne.produitId, etablissementId, aLivrer);
+        const quantiteReelle = lotsChoisis.reduce((acc, l) => acc + l.quantite, 0);
+        quantiteReelleParProduit.set(ligne.produitId, quantiteReelle);
         for (const lotChoisi of lotsChoisis) {
           lignesBl.push({ produitId: ligne.produitId, lotId: lotChoisi.lotId, quantiteEnvoyee: lotChoisi.quantite });
+        }
+        if (quantiteNonCouverte > 0) {
+          console.error(
+            `Écart stock agrégé / lots réels détecté : ${ligne.produitId} à l'établissement ${etablissementId} — ${quantiteNonCouverte} unité(s) attendue(s) introuvable(s) dans les lots réels.`
+          );
         }
       }
       blGenere = await prisma.bordereauLivraison.create({
@@ -406,10 +420,12 @@ async function executerValidationOuModification({ etablissementId, utilisateurId
           },
         });
       }
-      for (const { ligne, aLivrer } of lignesALivrer) {
+      for (const { ligne } of lignesALivrer) {
+        const quantiteReelle = quantiteReelleParProduit.get(ligne.produitId) || 0;
+        if (quantiteReelle === 0) continue;
         await prisma.stock.update({
           where: { produitId_etablissementId: { produitId: ligne.produitId, etablissementId } },
-          data: { quantiteTotale: { decrement: aLivrer } },
+          data: { quantiteTotale: { decrement: quantiteReelle } },
         });
         await recalculerStatutStock(ligne.produitId, etablissementId);
       }

@@ -164,9 +164,9 @@ async function creerUtilisateur(req, res) {
 }
 
 // PATCH /admin/utilisateurs/:id
-// Body : n'importe quel sous-ensemble de { nomComplet, identifiant, telephone,
-// actif, estAdminSysteme, motDePasse }. motDePasse, s'il est fourni,
-// réinitialise le mot de passe (ré-haché) — sinon inchangé.
+// Body : n'importe quel sous-ensemble de { nomComplet, telephone, actif,
+// estAdminSysteme, motDePasse }. motDePasse, s'il est fourni, réinitialise
+// le mot de passe (ré-haché) — sinon inchangé.
 async function modifierUtilisateur(req, res) {
   const { id } = req.params;
   const { nomComplet, identifiant, telephone, actif, estAdminSysteme, motDePasse } = req.body;
@@ -352,6 +352,60 @@ async function recalculerTousLesStatutsStock(req, res) {
   return res.json({ message: `Correction terminée : ${corriges} stock(s) corrigé(s) sur ${stocks.length} au total.` });
 }
 
+// POST /admin/reconcilier-stocks-lots
+// Correction ponctuelle : recale la quantité agrégée de chaque stock
+// (quantiteTotale) sur la somme réelle de ses lots en base — nécessaire
+// suite à la découverte d'un écart entre les deux (ex. Amoxicilline à un
+// GAS Moughataa : 1826 affiché vs 426 réellement dans les lots). Cet écart
+// provoquait une double conséquence : la validation d'une réquisition
+// croyait avoir plus de stock que la réalité (calcul de répartition faussé,
+// notification annonçant une quantité qui ne pouvait pas être réellement
+// livrée), et le produit disparaissait purement et simplement du bordereau
+// de livraison généré, faute de lot physique suffisant pour le couvrir. Le
+// bug de code à l'origine (décrémentation du stock sur la quantité demandée
+// plutôt que réellement prélevée dans les lots) est désormais corrigé, donc
+// cette correction n'a besoin d'être lancée qu'une seule fois pour rattraper
+// les données existantes.
+async function reconcilierStocksAvecLots(req, res) {
+  const stocks = await prisma.stock.findMany();
+
+  let corriges = 0;
+  const detail = [];
+  for (const stock of stocks) {
+    const lots = await prisma.lot.findMany({
+      where: { produitId: stock.produitId, etablissementId: stock.etablissementId },
+      select: { quantite: true },
+    });
+    const sommeReelle = lots.reduce((acc, l) => acc + l.quantite, 0);
+
+    if (sommeReelle !== stock.quantiteTotale) {
+      const etablissement = await prisma.etablissement.findUnique({
+        where: { id: stock.etablissementId },
+        select: { nom: true },
+      });
+      const produit = await prisma.produit.findUnique({ where: { id: stock.produitId }, select: { nom: true } });
+      detail.push({
+        etablissement: etablissement?.nom,
+        produit: produit?.nom,
+        avant: stock.quantiteTotale,
+        apres: sommeReelle,
+      });
+
+      await prisma.stock.update({
+        where: { produitId_etablissementId: { produitId: stock.produitId, etablissementId: stock.etablissementId } },
+        data: { quantiteTotale: sommeReelle },
+      });
+      await recalculerStatutStock(stock.produitId, stock.etablissementId);
+      corriges += 1;
+    }
+  }
+
+  return res.json({
+    message: `Réconciliation terminée : ${corriges} stock(s) corrigé(s) sur ${stocks.length} au total.`,
+    detail,
+  });
+}
+
 // PATCH /admin/drs/:id
 // Body : { nom?, code?, actif? }
 async function modifierDrs(req, res) {
@@ -465,6 +519,7 @@ module.exports = {
   listerTousLesLots,
   supprimerDrs,
   recalculerTousLesStatutsStock,
+  reconcilierStocksAvecLots,
   modifierDrs,
   modifierMoughataa,
   supprimerMoughataa,
