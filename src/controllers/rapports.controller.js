@@ -71,22 +71,29 @@ async function produitsEnRupture(req, res) {
   return res.json(Object.values(parProduit).sort((a, b) => b.structuresTouchees - a.structuresTouchees));
 }
 
-// GET /rapports/evolution-mouvements
-// Agrège les mouvements de stock des 30 derniers jours, jour par jour, pour
-// tracer une courbe entrées vs sorties. Utilise le vrai périmètre du rôle
-// (région entière pour un GAS DRS, Moughataa entière pour un GAS
-// Moughataa/Médecin Chef de Moughataa — pas seulement le dépôt propre), via
-// la même logique que le croisement de stocks, pour rester cohérent.
+// GET /rapports/evolution-mouvements?dateDebut=YYYY-MM-DD&dateFin=YYYY-MM-DD
+// Agrège les mouvements de stock jour par jour, pour tracer une courbe
+// entrées vs sorties, sur la période choisie par l'utilisateur (30 derniers
+// jours par défaut si aucune date n'est fournie, pour ne rien casser côté
+// écrans qui n'ont pas encore de sélecteur de dates). Utilise le vrai
+// périmètre du rôle (région entière pour un GAS DRS, Moughataa entière pour
+// un GAS Moughataa/Médecin Chef de Moughataa — pas seulement le dépôt
+// propre), via la même logique que le croisement de stocks.
 async function evolutionMouvements(req, res) {
   const { etablissementId, role } = req.utilisateur;
+  const { dateDebut, dateFin } = req.query;
   const etablissementIds = await perimetreEtablissementIds(etablissementId, role);
 
-  const ilYA30Jours = new Date();
-  ilYA30Jours.setDate(ilYA30Jours.getDate() - 30);
+  const debut = dateDebut ? new Date(dateDebut) : (() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 30);
+    return d;
+  })();
+  const fin = dateFin ? new Date(dateFin + "T23:59:59") : new Date();
 
   const mouvements = await prisma.mouvementStock.findMany({
     where: {
-      dateMouvement: { gte: ilYA30Jours },
+      dateMouvement: { gte: debut, lte: fin },
       type: { in: ["ENTREE", "SORTIE"] },
       ...(etablissementIds ? { lot: { etablissementId: { in: etablissementIds } } } : {}),
     },
@@ -103,6 +110,80 @@ async function evolutionMouvements(req, res) {
 
   const resultat = Object.values(parJour).sort((a, b) => a.date.localeCompare(b.date));
   return res.json(resultat);
+}
+
+// GET /rapports/mouvements-detailles?dateDebut=X&dateFin=Y&niveau=CAMEC|GAS_DRS|GAS_MOUGHATAA|FORMATION_SANITAIRE|GAS_PROGRAMME_NATIONAL
+// Détail ligne par ligne des entrées, sorties et péremptions sur une
+// période choisie — base commune du rapport Excel "Mouvements" et des KPI
+// CAMEC (combien livré, combien périmé). Toujours cloisonné au périmètre
+// réel du rôle ; le paramètre "niveau" restreint encore ce périmètre à un
+// seul type d'établissement, sans jamais en sortir.
+async function mouvementsDetailles(req, res) {
+  const { etablissementId, role } = req.utilisateur;
+  const { dateDebut, dateFin, niveau } = req.query;
+
+  if (!dateDebut || !dateFin) {
+    return res.status(400).json({ erreur: "dateDebut et dateFin sont requis." });
+  }
+
+  const debut = new Date(dateDebut);
+  const fin = new Date(dateFin + "T23:59:59");
+
+  const perimetre = await perimetreEtablissementIds(etablissementId, role);
+
+  let etablissementIdsFinal = perimetre;
+  if (niveau) {
+    const etabsNiveau = await prisma.etablissement.findMany({
+      where: { type: niveau, ...(perimetre ? { id: { in: perimetre } } : {}) },
+      select: { id: true },
+    });
+    etablissementIdsFinal = etabsNiveau.map((e) => e.id);
+  }
+
+  const filtreEtab = etablissementIdsFinal ? { etablissementId: { in: etablissementIdsFinal } } : {};
+
+  const mouvements = await prisma.mouvementStock.findMany({
+    where: {
+      dateMouvement: { gte: debut, lte: fin },
+      type: { in: ["ENTREE", "SORTIE"] },
+      lot: filtreEtab,
+    },
+    include: {
+      lot: { include: { produit: { select: { nom: true } }, etablissement: { select: { nom: true, type: true } } } },
+    },
+    orderBy: { dateMouvement: "asc" },
+  });
+
+  function formaterLigne(m) {
+    return {
+      produit: m.lot.produit.nom,
+      numeroLot: m.lot.numeroLot,
+      quantite: m.quantite,
+      etablissement: m.lot.etablissement.nom,
+      referenceType: m.referenceType,
+      date: m.dateMouvement,
+    };
+  }
+
+  const entrees = mouvements.filter((m) => m.type === "ENTREE").map(formaterLigne);
+  const sorties = mouvements.filter((m) => m.type === "SORTIE").map(formaterLigne);
+
+  const lotsPerimesPeriode = await prisma.lot.findMany({
+    where: {
+      ...filtreEtab,
+      datePeremption: { gte: debut, lte: fin },
+    },
+    include: { produit: { select: { nom: true } }, etablissement: { select: { nom: true } } },
+  });
+  const perimes = lotsPerimesPeriode.map((l) => ({
+    produit: l.produit.nom,
+    numeroLot: l.numeroLot,
+    quantite: l.quantite,
+    etablissement: l.etablissement.nom,
+    datePeremption: l.datePeremption,
+  }));
+
+  return res.json({ entrees, sorties, perimes });
 }
 
 // GET /rapports/requisitions-kanban
@@ -141,4 +222,4 @@ async function requisitionsKanban(req, res) {
   );
 }
 
-module.exports = { tableauDeBord, produitsEnRupture, evolutionMouvements, requisitionsKanban };
+module.exports = { tableauDeBord, produitsEnRupture, evolutionMouvements, requisitionsKanban, mouvementsDetailles };
