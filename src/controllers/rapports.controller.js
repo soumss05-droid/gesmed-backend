@@ -189,21 +189,44 @@ async function mouvementsDetailles(req, res) {
 // GET /rapports/requisitions-kanban
 // Liste les réquisitions cloisonnées par périmètre, pour un affichage en
 // tableau Kanban (une colonne par statut).
+//
+// Cas particulier CAMEC : le périmètre habituel (demandeur ou niveau actuel
+// = son propre établissement) ne montrerait que les réquisitions DÉJÀ
+// arrivées à son niveau — trop tard pour anticiper. La CAMEC voit donc en
+// plus, dès leur création et quel que soit leur niveau actuel : (1) les
+// commandes de réapprovisionnement propres à chaque GAS DRS (la seule voie
+// légitime vers CAMEC hors exception), et (2) toutes les réquisitions des
+// établissements en approvisionnement direct CAMEC (Moughataa ou FS en
+// exception géographique), qui la concernent de bout en bout même avant
+// d'avoir atteint son niveau.
 async function requisitionsKanban(req, res) {
   const { utilisateur } = req;
   const estVueNationale = utilisateur.role === "AUDITEUR" || utilisateur.role === "ADMIN";
+  const estCamec = utilisateur.role === "GESTIONNAIRE_CAMEC";
+
+  const filtrePerimetre = estVueNationale
+    ? {}
+    : estCamec
+    ? {
+        OR: [
+          { etablissementDemandeurId: utilisateur.etablissementId },
+          { niveauActuelId: utilisateur.etablissementId },
+          { etablissementDemandeur: { type: "GAS_DRS" } },
+          { etablissementDemandeur: { approvisionnementDirectCamec: true } },
+        ],
+      }
+    : {
+        OR: [
+          { etablissementDemandeurId: utilisateur.etablissementId },
+          { niveauActuelId: utilisateur.etablissementId },
+        ],
+      };
 
   const requisitions = await prisma.requisition.findMany({
-    where: estVueNationale
-      ? {}
-      : {
-          OR: [
-            { etablissementDemandeurId: utilisateur.etablissementId },
-            { niveauActuelId: utilisateur.etablissementId },
-          ],
-        },
+    where: filtrePerimetre,
     include: {
       etablissementDemandeur: { select: { nom: true } },
+      niveauActuel: { select: { nom: true } },
       lignes: { include: { produit: { select: { nom: true } } } },
     },
     orderBy: { dateDerniereMaj: "desc" },
@@ -213,8 +236,10 @@ async function requisitionsKanban(req, res) {
   return res.json(
     requisitions.map((r) => ({
       id: r.id,
+      numero: r.numero,
       statut: r.statut,
       demandeur: r.etablissementDemandeur.nom,
+      niveauActuel: r.niveauActuel?.nom || null,
       dateDerniereMaj: r.dateDerniereMaj,
       nbLignes: r.lignes.length,
       premierProduit: r.lignes[0]?.produit.nom || null,
