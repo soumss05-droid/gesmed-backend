@@ -525,6 +525,32 @@ async function calculerCmm(req, res) {
   return res.json(resultat);
 }
 
+// GET /stocks/dmm-propre
+// DMM (Distribution Moyenne Mensuelle) propre à l'établissement connecté —
+// ce que LUI a distribué vers le niveau en dessous (sorties de type BL
+// depuis ses propres lots), sur les 6 derniers mois. Distinct de la CMM
+// ci-dessus, qui mesure la consommation réelle des patients au niveau
+// formation sanitaire : un GAS Moughataa ou un GAS DRS comptant son PROPRE
+// dépôt en inventaire physique doit voir son propre rythme de distribution,
+// pas la consommation de ses formations sanitaires. Réservé aux niveaux qui
+// distribuent réellement depuis leur propre stock.
+async function dmmPropre(req, res) {
+  const { etablissementId, role } = req.utilisateur;
+
+  if (!["GAS_MOUGHATAA", "MEDECIN_CHEF_MOUGHATAA", "GESTIONNAIRE_DRS", "DIRECTEUR_DRS", "GESTIONNAIRE_CAMEC", "ADMIN"].includes(role)) {
+    return res.status(403).json({ erreur: "Le DMM propre n'est pas disponible pour ton rôle." });
+  }
+
+  const dmmMap = await cmmParProduit(etablissementId, "BL");
+  const produits = await prisma.produit.findMany();
+
+  const resultat = produits
+    .filter((p) => dmmMap[p.id])
+    .map((p) => ({ produit: p.nom, dmm: dmmMap[p.id] }));
+
+  return res.json(resultat);
+}
+
 // ---------------------------------------------------------------------------
 // Commande suggérée par niveau : CMM propre à chaque échelon + stock
 // disponible cumulé sur son territoire réel (pas juste son dépôt).
@@ -875,8 +901,6 @@ async function performanceMoughataa(req, res) {
   const { produitId } = req.query;
   const modeGlobal = !produitId;
 
-  const etablissement = await prisma.etablissement.findUnique({ where: { id: etablissementId } });
-
   let moughataas;
   if (role === "ADMIN") {
     moughataas = await prisma.etablissement.findMany({
@@ -884,6 +908,7 @@ async function performanceMoughataa(req, res) {
       include: { moughataa: true },
     });
   } else if (role === "GESTIONNAIRE_DRS" || role === "DIRECTEUR_DRS") {
+    const etablissement = await prisma.etablissement.findUnique({ where: { id: etablissementId } });
     moughataas = await prisma.etablissement.findMany({
       where: { type: "GAS_MOUGHATAA", drsId: etablissement.drsId },
       include: { moughataa: true },
@@ -943,4 +968,5 @@ module.exports = {
   cmmParProduit,
   performanceMoughataa,
   creerOuIncrementerLot,
+  dmmPropre,
 };

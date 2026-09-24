@@ -10,6 +10,7 @@ const {
   commandeSuggeree,
   croisementStock,
   performanceMoughataa,
+  dmmPropre,
 } = require("../controllers/stocks.controller");
 
 const router = express.Router();
@@ -17,6 +18,7 @@ const router = express.Router();
 router.get("/", authentifier, listerStocks);
 router.get("/reseau", authentifier, stockReseau);
 router.get("/cmm", authentifier, calculerCmm);
+router.get("/dmm-propre", authentifier, dmmPropre);
 router.get("/commande-suggeree", authentifier, commandeSuggeree);
 router.get("/croisement", authentifier, croisementStock);
 router.get("/performance-moughataa", authentifier, performanceMoughataa);
