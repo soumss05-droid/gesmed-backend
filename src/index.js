@@ -11,7 +11,6 @@ const ecartsRoutes = require("./routes/ecarts.routes");
 const rapportsRoutes = require("./routes/rapports.routes");
 const produitsRoutes = require("./routes/produits.routes");
 const adminRoutes = require("./routes/admin.routes");
-const receptionsRoutes = require("./routes/receptions.routes");
 const inventairesRoutes = require("./routes/inventaires.routes");
 const notificationsRoutes = require("./routes/notifications.routes");
 
@@ -30,7 +29,6 @@ app.use("/ecarts", ecartsRoutes);
 app.use("/rapports", rapportsRoutes);
 app.use("/produits", produitsRoutes);
 app.use("/admin", adminRoutes);
-app.use("/receptions", receptionsRoutes);
 app.use("/inventaires", inventairesRoutes);
 app.use("/notifications", notificationsRoutes);
 

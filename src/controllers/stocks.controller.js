@@ -7,50 +7,66 @@ function calculerStatut(quantite, seuilMin, seuilMax) {
   return "NORMAL";
 }
 
+// Coefficients utilisés pour calculer dynamiquement les seuils min/max de
+// chaque établissement à partir de sa consommation réelle : CMM (dispensation
+// aux patients) pour une formation sanitaire, DMM propre (sorties BL vers le
+// niveau du dessous) pour les niveaux qui redistribuent. Ajustables selon la
+// politique nationale de stock de sécurité — la formation sanitaire garde ici
+// exactement les mêmes valeurs qu'avant (0.5 mois / 3 mois).
+const COEFFICIENTS_SEUILS = {
+  FORMATION_SANITAIRE: { min: 0.5, max: 3 },
+  GAS_MOUGHATAA: { min: 1, max: 3 },
+  GAS_DRS: { min: 2, max: 6 },
+  CAMEC: { min: 3, max: 12 },
+};
+
 // Recalcule et enregistre le statut d'un stock à partir de sa quantité
 // actuelle et de ses seuils — à appeler systématiquement après TOUT
 // changement de quantiteTotale, pour que le statut ne reste jamais figé sur
 // une ancienne valeur (ex. "RUPTURE" qui persiste après une rentrée).
 //
-// Pour une formation sanitaire uniquement, les seuils eux-mêmes sont aussi
-// recalculés dynamiquement à partir de son propre CMM (0,5 mois pour le
-// seuil min, 3 mois pour le seuil max) — bien plus pertinent que le seuil
-// générique du produit, identique partout. Les autres niveaux (Moughataa,
-// DRS, CAMEC) gardent leurs seuils actuels : ils disposent déjà d'outils
-// plus fins (croisement, performance, commande suggérée). Tant qu'aucun
-// historique de dispensation n'existe encore (CMM = 0), on garde les seuils
-// par défaut du produit plutôt que 0/0, qui classerait à tort en "Surstock".
+// Pour tout établissement détenant un stock physique (formation sanitaire,
+// GAS Moughataa, GAS DRS, CAMEC), les seuils eux-mêmes sont aussi recalculés
+// dynamiquement à partir de sa propre consommation (CMM pour la dispensation,
+// DMM propre pour les niveaux qui redistribuent) — bien plus pertinent qu'un
+// seuil générique identique partout. Tant qu'aucun historique de sortie
+// n'existe encore pour ce produit à ce niveau (produit tout juste introduit
+// dans le réseau), on ne peut pas juger d'un éventuel surstock : seule une
+// vraie rupture (quantité nulle) est signalée, le reste est classé "NORMAL"
+// en attendant d'avoir assez de recul.
 async function recalculerStatutStock(produitId, etablissementId) {
   const stock = await prisma.stock.findUnique({
     where: { produitId_etablissementId: { produitId, etablissementId } },
   });
   if (!stock) return null;
 
-  let seuilMin = stock.seuilMin;
-  let seuilMax = stock.seuilMax;
-
   const etablissement = await prisma.etablissement.findUnique({
     where: { id: etablissementId },
     select: { type: true },
   });
 
-  if (etablissement?.type === "FORMATION_SANITAIRE") {
-    const cmmMap = await cmmParProduit(etablissementId, "DISPENSATION");
+  const coefficients = etablissement?.type ? COEFFICIENTS_SEUILS[etablissement.type] : null;
+
+  let seuilMin = stock.seuilMin;
+  let seuilMax = stock.seuilMax;
+  let statut;
+
+  if (coefficients) {
+    const referenceType = etablissement.type === "FORMATION_SANITAIRE" ? "DISPENSATION" : "BL";
+    const cmmMap = await cmmParProduit(etablissementId, referenceType);
     const cmm = cmmMap[produitId] || 0;
+
     if (cmm > 0) {
-      seuilMin = Math.round(cmm * 0.5);
-      seuilMax = Math.round(cmm * 3);
+      seuilMin = Math.round(cmm * coefficients.min);
+      seuilMax = Math.round(cmm * coefficients.max);
+      statut = calculerStatut(stock.quantiteTotale, seuilMin, seuilMax);
     } else {
-      const produit = await prisma.produit.findUnique({
-        where: { id: produitId },
-        select: { seuilMinDefaut: true, seuilMaxDefaut: true },
-      });
-      seuilMin = produit?.seuilMinDefaut ?? stock.seuilMin;
-      seuilMax = produit?.seuilMaxDefaut ?? stock.seuilMax;
+      statut = stock.quantiteTotale <= 0 ? "RUPTURE" : "NORMAL";
     }
+  } else {
+    statut = calculerStatut(stock.quantiteTotale, seuilMin, seuilMax);
   }
 
-  const statut = calculerStatut(stock.quantiteTotale, seuilMin, seuilMax);
   if (statut === stock.statut && seuilMin === stock.seuilMin && seuilMax === stock.seuilMax) return stock;
   return prisma.stock.update({
     where: { produitId_etablissementId: { produitId, etablissementId } },
@@ -66,7 +82,7 @@ async function recalculerStatutStock(produitId, etablissementId) {
 // lot est unique par établissement, sa péremption invariante). Sans cette
 // vérification, la deuxième réception d'un même lot échouait avec une
 // erreur de contrainte non gérée.
-async function creerOuIncrementerLot({ produitId, etablissementId, numeroLot, datePeremption, quantite }) {
+async function creerOuIncrementerLot({ produitId, etablissementId, numeroLot, datePeremption, quantite, fournisseur, prixUnitaire, note, dateReception }) {
   const lotExistant = await prisma.lot.findUnique({
     where: { etablissementId_numeroLot: { etablissementId, numeroLot } },
   });
@@ -84,7 +100,17 @@ async function creerOuIncrementerLot({ produitId, etablissementId, numeroLot, da
   }
 
   return prisma.lot.create({
-    data: { produitId, etablissementId, numeroLot, datePeremption, quantite },
+    data: {
+      produitId,
+      etablissementId,
+      numeroLot,
+      datePeremption,
+      quantite,
+      ...(fournisseur !== undefined ? { fournisseur } : {}),
+      ...(prixUnitaire !== undefined ? { prixUnitaire } : {}),
+      ...(note !== undefined ? { note } : {}),
+      ...(dateReception !== undefined ? { dateReception } : {}),
+    },
   });
 }
 
@@ -148,17 +174,10 @@ async function stockReseau(req, res) {
   const { etablissementId, role } = req.utilisateur;
   const etablissement = await prisma.etablissement.findUnique({ where: { id: etablissementId } });
 
-  // Vue CAMEC : cas particulier — chaque ligne représente une région
-  // entière (dépôt DRS + tous ses Moughataa + toutes leurs formations
-  // sanitaires, additionnés), pas seulement le dépôt DRS lui-même. C'est la
-  // seule vue de cet écran qui agrège plusieurs établissements en une seule
-  // ligne plutôt que d'en lister un par un — la CAMEC raisonne région par
-  // région, pas établissement par établissement.
   if (role === "GESTIONNAIRE_CAMEC") {
     const toutesLesDrs = await prisma.drs.findMany({ orderBy: { nom: "asc" } });
     const resultatCamec = [];
 
-    // Ligne 0 : le dépôt CAMEC lui-même, comme pour les autres rôles.
     const stocksCamec = await prisma.stock.findMany({
       where: { etablissementId },
       include: { produit: true },
@@ -188,8 +207,6 @@ async function stockReseau(req, res) {
       })),
     });
 
-    // Une ligne par région : tous les établissements de la région
-    // (dépôt DRS + Moughataa + FS) additionnés en un seul total par produit.
     for (const drs of toutesLesDrs) {
       const moughataasRegion = await prisma.moughataa.findMany({ where: { drsId: drs.id }, select: { id: true } });
       const moughataaIds = moughataasRegion.map((m) => m.id);
@@ -231,7 +248,7 @@ async function stockReseau(req, res) {
           produitId,
           produit: v.produit,
           quantiteTotale: v.quantiteTotale,
-          statut: null, // Agrégat régional : pas de seuil unique applicable, pas de badge de statut.
+          statut: null,
         })),
         lotsPerimes: lotsPerimesRegion.map((l) => ({
           produit: l.produit.nom,
@@ -288,9 +305,6 @@ async function stockReseau(req, res) {
     return res.status(403).json({ erreur: "Cette vue n'est pas disponible pour ton rôle." });
   }
 
-  // Le dépôt du niveau consulté apparaît toujours en premier dans la liste,
-  // avant les établissements qui en dépendent — plus lisible que l'ordre
-  // arbitraire renvoyé par la base.
   etablissementsCibles.sort((a, b) => {
     if (a.id === etablissementId) return -1;
     if (b.id === etablissementId) return 1;
@@ -320,19 +334,12 @@ async function stockReseau(req, res) {
     include: { produit: true },
   });
 
-  // Nom d'affichage propre : "Moughataa Arafat" plutôt que "GAS Moughataa
-  // Arafat" (le nom de l'établissement lui-même, qui peut différer du nom
-  // de la Moughataa qu'il représente) ; le nom complet de la DRS pour un
-  // GAS DRS (déjà au format "DRS Nouakchott Nord", pas besoin de préfixe).
   function nomAffichage(etab) {
     if (etab.type === "GAS_MOUGHATAA" && etab.moughataa?.nom) return `Moughataa ${etab.moughataa.nom}`;
     if (etab.type === "GAS_DRS" && etab.drs?.nom) return etab.drs.nom;
     return etab.nom;
   }
 
-  // Clés de regroupement pour le filtrage en cascade côté frontend (région
-  // puis Moughataa) — remonte via la Moughataa quand l'établissement n'a
-  // pas de lien direct vers sa DRS (cas d'un GAS Moughataa ou d'une FS).
   function nomRegion(etab) {
     if (etab.type === "GAS_DRS") return etab.drs?.nom || null;
     return etab.moughataa?.drs?.nom || null;
@@ -372,11 +379,23 @@ async function stockReseau(req, res) {
 // POST /stocks/entree
 // Enregistre une réception externe (achat, don) directement dans le stock
 // de l'établissement de l'utilisateur connecté — typiquement la CAMEC,
-// point d'entrée des produits dans le système.
-// Body : { produitId, numeroLot, datePeremption, quantite }
+// point d'entrée des produits dans le système. Utilise creerOuIncrementerLot
+// pour ne jamais créer de doublon si le numéro de lot existe déjà.
+// Body : { produitId, numeroLot, datePeremption, quantite, dateReception?, fournisseur?, prixUnitaire?, note? }
 async function entreeStock(req, res) {
-  const { etablissementId, utilisateurId } = req.utilisateur;
-  const { produitId, numeroLot, datePeremption, quantite } = req.body;
+  const { role } = req.utilisateur;
+  let { etablissementId } = req.utilisateur;
+  const { produitId, numeroLot, datePeremption, quantite, dateReception, fournisseur, prixUnitaire, note } = req.body;
+
+  if (role === "ADMIN") {
+    const camec = await prisma.etablissement.findFirst({ where: { type: "CAMEC" } });
+    if (!camec) {
+      return res.status(500).json({ erreur: "Aucun établissement CAMEC trouvé en base." });
+    }
+    etablissementId = camec.id;
+  }
+
+  const { utilisateurId } = req.utilisateur;
 
   if (!produitId || !numeroLot || !datePeremption || !quantite) {
     return res.status(400).json({ erreur: "Produit, numéro de lot, date de péremption et quantité sont requis." });
@@ -385,15 +404,22 @@ async function entreeStock(req, res) {
     return res.status(400).json({ erreur: "La quantité doit être positive." });
   }
 
-  const lot = await prisma.lot.create({
-    data: {
+  let lot;
+  try {
+    lot = await creerOuIncrementerLot({
       produitId,
       etablissementId,
       numeroLot,
       datePeremption: new Date(datePeremption),
       quantite: Number(quantite),
-    },
-  });
+      fournisseur: fournisseur || undefined,
+      prixUnitaire: prixUnitaire !== undefined && prixUnitaire !== "" ? Number(prixUnitaire) : undefined,
+      note: note || undefined,
+      dateReception: dateReception ? new Date(dateReception) : undefined,
+    });
+  } catch (erreur) {
+    return res.status(409).json({ erreur: erreur.message });
+  }
 
   const stockExistant = await prisma.stock.findUnique({
     where: { produitId_etablissementId: { produitId, etablissementId } },
@@ -413,7 +439,7 @@ async function entreeStock(req, res) {
         quantiteTotale: Number(quantite),
         seuilMin: produit?.seuilMinDefaut ?? 0,
         seuilMax: produit?.seuilMaxDefaut ?? 0,
-        statut: "RUPTURE", // recalculé juste en dessous, valeur de départ neutre
+        statut: "RUPTURE",
       },
     });
   }
@@ -427,19 +453,26 @@ async function entreeStock(req, res) {
 }
 
 // POST /stocks/dispensation
-// Enregistre la remise réelle d'un produit à un patient (uniquement au
-// niveau formation sanitaire). Décrémente le stock en FEFO, comme une
-// sortie classique, mais avec un referenceType distinct pour ne jamais
-// être confondu avec une expédition (BL) vers un autre établissement.
+// Body : { produitId, quantite, typeBeneficiaire, beneficiaire }
+// typeBeneficiaire : PATIENT | LABORATOIRE | MATERNITE | SERVICE
+// beneficiaire : obligatoire (nom, téléphone ou code du bénéficiaire)
 async function enregistrerDispensation(req, res) {
   const { etablissementId, utilisateurId, role } = req.utilisateur;
   if (role !== "FORMATION_SANITAIRE") {
     return res.status(403).json({ erreur: "Seule une formation sanitaire peut enregistrer une dispensation." });
   }
 
-  const { produitId, quantite } = req.body;
+  const { produitId, quantite, typeBeneficiaire, beneficiaire } = req.body;
   if (!produitId || !quantite || Number(quantite) <= 0) {
     return res.status(400).json({ erreur: "Produit et quantité valide requis." });
+  }
+
+  const typesValides = ["PATIENT", "LABORATOIRE", "MATERNITE", "SERVICE"];
+  if (!typeBeneficiaire || !typesValides.includes(typeBeneficiaire)) {
+    return res.status(400).json({ erreur: "Type de bénéficiaire requis et invalide." });
+  }
+  if (!beneficiaire?.trim()) {
+    return res.status(400).json({ erreur: "Le nom, téléphone ou code du bénéficiaire est requis." });
   }
 
   const { lotsChoisis, quantiteNonCouverte } = await selectionnerLotFEFO(produitId, etablissementId, Number(quantite));
@@ -447,10 +480,28 @@ async function enregistrerDispensation(req, res) {
     return res.status(400).json({ erreur: `Stock insuffisant : ${quantiteNonCouverte} unité(s) manquante(s).` });
   }
 
+  const dispensation = await prisma.dispensation.create({
+    data: {
+      etablissementId,
+      produitId,
+      quantite: Number(quantite),
+      typeBeneficiaire,
+      beneficiaire: beneficiaire.trim(),
+      utilisateurId,
+    },
+  });
+
   for (const lotChoisi of lotsChoisis) {
     await prisma.lot.update({ where: { id: lotChoisi.lotId }, data: { quantite: { decrement: lotChoisi.quantite } } });
     await prisma.mouvementStock.create({
-      data: { lotId: lotChoisi.lotId, type: "SORTIE", quantite: lotChoisi.quantite, referenceType: "DISPENSATION", utilisateurId },
+      data: {
+        lotId: lotChoisi.lotId,
+        type: "SORTIE",
+        quantite: lotChoisi.quantite,
+        referenceType: "DISPENSATION",
+        referenceId: dispensation.id,
+        utilisateurId,
+      },
     });
   }
 
@@ -460,15 +511,10 @@ async function enregistrerDispensation(req, res) {
   });
   await recalculerStatutStock(produitId, etablissementId);
 
-  return res.status(201).json({ message: "Dispensation enregistrée." });
+  return res.status(201).json({ message: "Dispensation enregistrée.", dispensation });
 }
 
 // GET /stocks/cmm
-// Calcule le CMM (Consommation Moyenne Mensuelle) sur les 6 derniers mois,
-// à partir de la dispensation réelle des formations sanitaires. Pour un
-// niveau intermédiaire (Moughataa, DRS, Programme, CAMEC/Admin), le CMM
-// agrège la dispensation de toutes les formations sanitaires sous sa
-// responsabilité.
 async function calculerCmm(req, res) {
   const { etablissementId, role } = req.utilisateur;
   const etablissement = await prisma.etablissement.findUnique({ where: { id: etablissementId } });
@@ -526,14 +572,6 @@ async function calculerCmm(req, res) {
 }
 
 // GET /stocks/dmm-propre
-// DMM (Distribution Moyenne Mensuelle) propre à l'établissement connecté —
-// ce que LUI a distribué vers le niveau en dessous (sorties de type BL
-// depuis ses propres lots), sur les 6 derniers mois. Distinct de la CMM
-// ci-dessus, qui mesure la consommation réelle des patients au niveau
-// formation sanitaire : un GAS Moughataa ou un GAS DRS comptant son PROPRE
-// dépôt en inventaire physique doit voir son propre rythme de distribution,
-// pas la consommation de ses formations sanitaires. Réservé aux niveaux qui
-// distribuent réellement depuis leur propre stock.
 async function dmmPropre(req, res) {
   const { etablissementId, role } = req.utilisateur;
 
@@ -550,26 +588,6 @@ async function dmmPropre(req, res) {
 
   return res.json(resultat);
 }
-
-// ---------------------------------------------------------------------------
-// Commande suggérée par niveau : CMM propre à chaque échelon + stock
-// disponible cumulé sur son territoire réel (pas juste son dépôt).
-//
-// CMM :
-//  - Formation sanitaire : dispensation réelle aux patients (SORTIE/DISPENSATION)
-//  - GAS Moughataa, GAS DRS, CAMEC : leur propre distribution vers le niveau
-//    juste en dessous (SORTIE/BL sortant de leurs propres lots)
-//
-// Stock disponible :
-//  - Formation sanitaire : son stock physique propre
-//  - GAS Moughataa : son stock physique + celui de ses formations sanitaires
-//  - GAS DRS : son stock physique + stock cumulé de chaque Moughataa
-//    (dépôt + ses FS)
-//  - CAMEC : son stock physique + stock cumulé de chaque région (DRS)
-//
-// Quantité suggérée = (N × CMM) − stock disponible, jamais négative.
-// N = 1 (formation sanitaire), 3 (GAS Moughataa), 6 (GAS DRS).
-// ---------------------------------------------------------------------------
 
 const N_MOIS_CIBLE = {
   FORMATION_SANITAIRE: 1,
@@ -591,9 +609,6 @@ function fusionner(cible, source) {
   return cible;
 }
 
-// Stock disponible cumulé sur tout le territoire réel de l'établissement
-// (récursif : un GAS DRS cumule le stock physique de chaque Moughataa, qui
-// lui-même cumule déjà le stock physique de ses formations sanitaires).
 async function stockDisponibleCumule(etablissement) {
   const total = await stockPhysiqueParProduit(etablissement.id);
 
@@ -626,8 +641,6 @@ async function stockDisponibleCumule(etablissement) {
   return total;
 }
 
-// CMM par produit, basé sur les sorties réelles de l'établissement lui-même
-// (dispensation pour une formation sanitaire, distribution/BL pour les autres).
 async function cmmParProduit(etablissementId, referenceType) {
   const ilYA6Mois = new Date();
   ilYA6Mois.setMonth(ilYA6Mois.getMonth() - 6);
@@ -654,8 +667,6 @@ async function cmmParProduit(etablissementId, referenceType) {
   return cmm;
 }
 
-// Calcule, pour un établissement donné, le CMM, le stock disponible cumulé
-// et la quantité suggérée à commander, produit par produit.
 async function calculerCommandeSuggereePourEtablissement(etablissementId) {
   const etablissement = await prisma.etablissement.findUnique({ where: { id: etablissementId } });
   if (!etablissement) throw new Error("Établissement introuvable.");
@@ -702,18 +713,10 @@ async function commandeSuggeree(req, res) {
 }
 
 // GET /stocks/croisement?produitId=xxx&regroupement=moughataa|formationsanitaire
-// Répartition d'un produit sur le périmètre du niveau consulté — région
-// entière pour un GAS DRS/Directeur DRS (regroupée par Moughataa ou détaillée
-// par formation sanitaire), ou Moughataa entière pour un GAS
-// Moughataa/Médecin Chef de Moughataa (détaillée par formation sanitaire).
-// Renvoie aussi le total, pour afficher le "stock total" du niveau.
 async function croisementStock(req, res) {
   const { etablissementId, role } = req.utilisateur;
   const { produitId, produitIds, regroupement } = req.query;
 
-  // Accepte soit un seul produitId (historique), soit plusieurs produitIds
-  // séparés par des virgules — dans ce cas, les quantités des produits
-  // sélectionnés sont additionnées par établissement avant regroupement.
   const listeProduits = produitIds
     ? produitIds.split(",").map((p) => p.trim()).filter(Boolean)
     : produitId
@@ -735,7 +738,6 @@ async function croisementStock(req, res) {
     });
     regroupementsAutorises = ["drs", "moughataa", "formationsanitaire"];
   } else if (role === "GAS_PROGRAMME_NATIONAL") {
-    // Vue nationale, mais limitée aux produits de son propre programme.
     const produitsChoisis = await prisma.produit.findMany({ where: { id: { in: listeProduits } } });
     const horsProgramme = produitsChoisis.find((p) => p.programmeId !== etablissement.programmeId);
     if (produitsChoisis.length !== listeProduits.length || horsProgramme) {
@@ -787,9 +789,6 @@ async function croisementStock(req, res) {
     where: { etablissementId: { in: etablissementIds }, produitId: { in: listeProduits } },
   });
 
-  // Additionne les quantités de TOUS les produits sélectionnés pour un même
-  // établissement — un établissement peut avoir jusqu'à listeProduits.length
-  // lignes de stock désormais, une par produit choisi.
   function quantiteEtab(etabId) {
     return stocks.filter((s) => s.etablissementId === etabId).reduce((acc, s) => acc + s.quantiteTotale, 0);
   }
@@ -810,10 +809,6 @@ async function croisementStock(req, res) {
     for (const etab of etablissementsCibles) {
       const quantite = quantiteEtab(etab.id);
       if (quantite === 0 && !stocks.some((s) => s.etablissementId === etab.id)) continue;
-      // Toujours regrouper sous le nom de la Moughataa elle-même (jamais le
-      // nom de l'établissement GAS Moughataa, qui peut différer) — sinon le
-      // dépôt et ses formations sanitaires se retrouvent scindés en deux
-      // lignes distinctes pour la même Moughataa.
       const cle = etab.moughataa?.nom;
       if (!cle) continue;
       totaux[cle] = (totaux[cle] || 0) + quantite;
@@ -832,11 +827,6 @@ async function croisementStock(req, res) {
   return res.json({ regroupement: regroupementFinal, regroupementsDisponibles: regroupementsAutorises, lignes, total });
 }
 
-// Liste des identifiants d'établissements du périmètre réel d'un
-// utilisateur, selon son rôle — réutilisée à la fois pour le stock réseau et
-// pour les rapports (évolution des mouvements), afin d'éviter deux logiques
-// différentes qui finiraient par diverger. `null` signifie "pas de filtre"
-// (vue nationale, réservée à ADMIN/AUDITEUR).
 async function perimetreEtablissementIds(etablissementId, role) {
   if (role === "ADMIN" || role === "AUDITEUR") return null;
 
@@ -884,18 +874,10 @@ async function perimetreEtablissementIds(etablissementId, role) {
     return etabs.map((e) => e.id);
   }
 
-  // FORMATION_SANITAIRE et rôles non listés : uniquement son propre établissement.
   return [etablissementId];
 }
 
 // GET /stocks/performance-moughataa?produitId=xxx
-// Indicateur de performance de gestion : compare, pour chaque Moughataa du
-// périmètre, ce qu'elle a elle-même distribué (son DMM) à ce que ses
-// formations sanitaires ont réellement consommé (la somme de leurs CMM). En
-// théorie, bien gérés, ces deux chiffres convergent — un écart persistant
-// signale soit un sous-approvisionnement chronique, soit un problème de
-// dimensionnement. Réservé au GAS DRS/Directeur DRS (sa région) et à
-// l'Admin (vue nationale).
 async function performanceMoughataa(req, res) {
   const { etablissementId, role } = req.utilisateur;
   const { produitId } = req.query;
@@ -917,8 +899,6 @@ async function performanceMoughataa(req, res) {
     return res.status(403).json({ erreur: "Cette vue n'est pas disponible pour ton rôle." });
   }
 
-  // Somme toutes les valeurs de la carte CMM (tous produits confondus) en
-  // mode global, ou prend juste le produit choisi en mode détaillé.
   function extraireValeur(map) {
     if (modeGlobal) return Object.values(map).reduce((acc, v) => acc + v, 0);
     return map[produitId] || 0;

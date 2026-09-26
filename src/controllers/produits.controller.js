@@ -16,14 +16,19 @@ async function listerProgrammesPourProduit(req, res) {
 }
 
 // POST /produits
-// Body : { nom, forme?, unite?, seuilMinDefaut, seuilMaxDefaut, programmeId }
+// Body : { nom, forme?, unite?, programmeId }
 // Réservé à la CAMEC et à l'Admin — ce sont eux qui introduisent les
 // nouveaux produits dans le système, typiquement au moment d'une rentrée.
+//
+// Les seuils min/max ne sont plus saisis à la création : ils démarrent à 0
+// et seront calculés automatiquement à partir de la CMM/DMM une fois que
+// le produit aura un historique de consommation dans le réseau (voir la
+// fonction de recalcul des seuils dans stocks.controller.js).
 async function creerProduit(req, res) {
-  const { nom, forme, unite, seuilMinDefaut, seuilMaxDefaut, programmeId } = req.body;
+  const { nom, forme, unite, programmeId } = req.body;
 
-  if (!nom || !programmeId || seuilMinDefaut === undefined || seuilMaxDefaut === undefined) {
-    return res.status(400).json({ erreur: "Nom, programme, seuil min et seuil max sont requis." });
+  if (!nom || !programmeId) {
+    return res.status(400).json({ erreur: "Nom et programme sont requis." });
   }
 
   const produit = await prisma.produit.create({
@@ -31,8 +36,8 @@ async function creerProduit(req, res) {
       nom,
       forme: forme || null,
       unite: unite || null,
-      seuilMinDefaut: Number(seuilMinDefaut),
-      seuilMaxDefaut: Number(seuilMaxDefaut),
+      seuilMinDefaut: 0,
+      seuilMaxDefaut: 0,
       programmeId,
     },
   });

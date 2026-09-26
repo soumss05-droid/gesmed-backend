@@ -77,6 +77,7 @@ model Etablissement {
   inventaires                 InventairePhysique[]
   notifications                Notification[]
   notificationsEnTantQuAuteur  Notification[] @relation("NotificationAuteur")
+  dispensations                Dispensation[]
 
   @@map("etablissements")
 }
@@ -100,6 +101,7 @@ model Utilisateur {
   ecartsDecides    BlLigne[]           @relation("EcartDecideur")
   ecartsInventaireDecides LigneInventaire[]
   inventaires      InventairePhysique[]
+  dispensations    Dispensation[]
 
   @@map("utilisateurs")
 }
@@ -148,6 +150,7 @@ model Produit {
   requisitionLignes RequisitionLigne[]
   blLignes         BlLigne[]
   notifications    Notification[]
+  dispensations    Dispensation[]
 
   @@map("produits")
 }
@@ -399,4 +402,41 @@ model Notification {
   createdAt       DateTime          @default(now()) @map("created_at")
 
   @@map("notifications")
+}
+
+// ============================================================
+// 7. Dispensations (sortie vers un bénéficiaire final — patient,
+//    laboratoire, maternité ou autre service interne)
+// ============================================================
+
+enum TypeBeneficiaire {
+  PATIENT
+  LABORATOIRE
+  MATERNITE
+  SERVICE
+  AUTRE
+}
+
+enum StatutDispensation {
+  ACTIVE
+  ANNULEE
+}
+
+model Dispensation {
+  id                String              @id @default(uuid())
+  numero            Int                 @unique @default(autoincrement())
+  etablissementId   String              @map("etablissement_id")
+  etablissement     Etablissement       @relation(fields: [etablissementId], references: [id])
+  produitId         String              @map("produit_id")
+  produit           Produit             @relation(fields: [produitId], references: [id])
+  quantite          Int
+  typeBeneficiaire  TypeBeneficiaire    @map("type_beneficiaire")
+  beneficiaire      String?
+  utilisateurId     String              @map("utilisateur_id")
+  utilisateur       Utilisateur         @relation(fields: [utilisateurId], references: [id])
+  dateDispensation  DateTime            @default(now()) @map("date_dispensation")
+  statut            StatutDispensation  @default(ACTIVE)
+  motifAnnulation   String?             @map("motif_annulation")
+
+  @@map("dispensations")
 }

@@ -53,6 +53,21 @@ async function creerRequisition(req, res) {
   return res.status(201).json(requisition);
 }
 
+// GET /requisitions/a-valider
+// Réquisitions en attente au niveau de l'utilisateur connecté (tous rôles
+// validateurs : GAS Moughataa, GAS DRS, GAS Programme national, CAMEC).
+//
+// Pour chaque ligne, on attache deux informations calculées côté serveur,
+// pour que le validateur voie l'écart avant de décider :
+//  - quantiteNormale : ce que le système jugerait normal de commander pour
+//    l'établissement demandeur (CMM/DMM + stock disponible cumulé).
+//  - statutStockDemandeur : le statut actuel du stock du demandeur pour ce
+//    produit (RUPTURE/SOUS_SEUIL/NORMAL/SURSTOCK).
+//  - alerteSurstock : vrai si le demandeur est déjà en surstock sur ce
+//    produit, ou si la quantité demandée dépasse largement (+50%) la
+//    quantité normale calculée.
+// Fonctionne identiquement à tous les niveaux du circuit (FOSA→Moughataa,
+// Moughataa→DRS, DRS→Programme national).
 async function listerAValider(req, res) {
   const { etablissementId } = req.utilisateur;
   const requisitions = await prisma.requisition.findMany({
@@ -63,6 +78,41 @@ async function listerAValider(req, res) {
     include: { lignes: { include: { produit: true } }, etablissementDemandeur: true },
     orderBy: { dateCreation: "asc" },
   });
+
+  const suggestionsParDemandeur = new Map();
+  const statutsParDemandeur = new Map();
+
+  for (const requisition of requisitions) {
+    const demandeurId = requisition.etablissementDemandeurId;
+
+    if (!suggestionsParDemandeur.has(demandeurId)) {
+      let suggestionMap = {};
+      try {
+        const suggestions = await calculerCommandeSuggereePourEtablissement(demandeurId);
+        for (const s of suggestions) suggestionMap[s.produitId] = s.quantiteSuggeree;
+      } catch (erreur) {
+        console.error("Erreur lors du calcul de la commande suggérée pour l'alerte de validation :", erreur);
+      }
+      suggestionsParDemandeur.set(demandeurId, suggestionMap);
+
+      const stocksDemandeur = await prisma.stock.findMany({ where: { etablissementId: demandeurId } });
+      const statutMap = {};
+      for (const s of stocksDemandeur) statutMap[s.produitId] = s.statut;
+      statutsParDemandeur.set(demandeurId, statutMap);
+    }
+
+    const suggestionMap = suggestionsParDemandeur.get(demandeurId);
+    const statutMap = statutsParDemandeur.get(demandeurId);
+
+    requisition.lignes = requisition.lignes.map((ligne) => {
+      const quantiteNormale = suggestionMap[ligne.produitId] ?? 0;
+      const statutStockDemandeur = statutMap[ligne.produitId] || null;
+      const alerteSurstock =
+        statutStockDemandeur === "SURSTOCK" || ligne.quantiteValidee > quantiteNormale * 1.5;
+      return { ...ligne, quantiteNormale, statutStockDemandeur, alerteSurstock };
+    });
+  }
+
   return res.json(requisitions);
 }
 
@@ -129,6 +179,16 @@ async function creerNotification({ etablissementId, etablissementAuteurId = null
   } catch (erreur) {
     console.error("Erreur lors de la création d'une notification :", erreur);
   }
+}
+
+// Construit une description lisible des écarts de livraison, produit par
+// produit, pour que la notification envoyée au demandeur soit exploitable
+// sans qu'il ait besoin de revenir demander des précisions.
+function decrireEcarts(repartition) {
+  return repartition
+    .filter((r) => r.aRemonter > 0)
+    .map((r) => `${r.ligne.produit.nom} (livré ${r.aLivrer}/${r.ligne.quantiteValidee}, manque ${r.aRemonter})`)
+    .join(" ; ");
 }
 
 // Erreur "métier" : porte un statut HTTP, pour que les points d'entrée
@@ -484,11 +544,9 @@ async function executerValidationOuModification({ etablissementId, utilisateurId
   // Pas d'escalade dans deux cas précis (sauf établissement exception, qui
   // escalade toujours) : (1) GAS Moughataa traitant une réquisition normale
   // d'une formation sanitaire, (2) GAS DRS traitant la commande de
-  // réapprovisionnement d'un GAS Moughataa. Dans les deux cas, on clôture
-  // avec ce qui a pu être livré — complet ou partiel — sans jamais remonter
-  // plus haut. La propre commande du GAS DRS vers CAMEC (demandeur = le GAS
-  // DRS lui-même) continue elle d'escalader normalement via le GAS
-  // Programme national, plus bas dans cette fonction.
+  // réapprovisionnement d'un GAS Moughataa. La propre commande du GAS DRS
+  // vers CAMEC continue d'escalader normalement via le GAS Programme
+  // national, plus bas dans cette fonction.
   // -------------------------------------------------------------------------
   let pasEscalade = false;
   if (!estException) {
@@ -509,14 +567,15 @@ async function executerValidationOuModification({ etablissementId, utilisateurId
     );
     const misAJour = await prisma.requisition.update({ where: { id: requisitionId }, data: { statut: "CLOTUREE" } });
     if (etablissementPrecedent) {
+      const detailEcarts = decrireEcarts(repartition);
       await creerNotification({
         etablissementId: etablissementPrecedent.id,
         etablissementAuteurId: etabActuel.id,
         type: typeNotif,
         message:
           lignesALivrer.length > 0
-            ? `La réquisition N°${requisitionAJour.numero} a été livrée partiellement — le reste n'a pas pu être fourni pour l'instant.`
-            : `La réquisition N°${requisitionAJour.numero} n'a pas pu être livrée : stock insuffisant au ${etabActuel.type === "GAS_MOUGHATAA" ? "GAS Moughataa" : "GAS DRS"}.`,
+            ? `La réquisition N°${requisitionAJour.numero} a été livrée partiellement — ${detailEcarts}.`
+            : `La réquisition N°${requisitionAJour.numero} n'a pas pu être livrée (stock insuffisant au ${etabActuel.type === "GAS_MOUGHATAA" ? "GAS Moughataa" : "GAS DRS"}) : ${detailEcarts}.`,
         requisitionId,
       });
     }
