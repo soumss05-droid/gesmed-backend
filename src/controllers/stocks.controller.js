@@ -520,6 +520,11 @@ async function enregistrerDispensation(req, res) {
 // sans elles, tout l'historique est renvoyé). Chaque formation sanitaire ne
 // voit que ses propres dispensations — c'est la contrepartie "lecture" de la
 // traçabilité obligatoire mise en place à l'enregistrement.
+//
+// Le nom de l'établissement est renvoyé avec le rapport pour que le document
+// exporté (PDF, image, impression) indique toujours de quelle formation
+// sanitaire il provient — sans ça, un rapport imprimé ne se distingue pas
+// d'un autre.
 async function rapportDispensations(req, res) {
   const { etablissementId, role } = req.utilisateur;
   if (role !== "FORMATION_SANITAIRE") {
@@ -534,6 +539,11 @@ async function rapportDispensations(req, res) {
     fin.setHours(23, 59, 59, 999); // Inclut toute la journée de fin.
     filtreDate.lte = fin;
   }
+
+  const etablissement = await prisma.etablissement.findUnique({
+    where: { id: etablissementId },
+    select: { nom: true },
+  });
 
   const dispensations = await prisma.dispensation.findMany({
     where: {
@@ -561,6 +571,7 @@ async function rapportDispensations(req, res) {
   }
 
   return res.json({
+    etablissement: etablissement?.nom || null,
     periode: { dateDebut: dateDebut || null, dateFin: dateFin || null },
     totalDispensations: dispensations.length,
     totalQuantite,
@@ -623,14 +634,21 @@ async function calculerCmm(req, res) {
     include: { lot: { include: { produit: true } } },
   });
 
-  const totalParProduit = {};
+  // Regroupement par produitId (pas par nom) — deux produits différents du
+  // catalogue peuvent porter exactement le même nom ; les regrouper par nom
+  // ferait fuiter le CMM de l'un vers l'autre. L'ID est la seule clé fiable,
+  // le nom n'étant récupéré qu'à l'affichage.
+  const totalParProduitId = {};
+  const nomParProduitId = {};
   for (const m of mouvements) {
-    const nom = m.lot.produit.nom;
-    totalParProduit[nom] = (totalParProduit[nom] || 0) + m.quantite;
+    const id = m.lot.produitId;
+    totalParProduitId[id] = (totalParProduitId[id] || 0) + m.quantite;
+    nomParProduitId[id] = m.lot.produit.nom;
   }
 
-  const resultat = Object.entries(totalParProduit).map(([produit, total]) => ({
-    produit,
+  const resultat = Object.entries(totalParProduitId).map(([produitId, total]) => ({
+    produitId,
+    produit: nomParProduitId[produitId],
     cmm: Math.round((total / 6) * 100) / 100,
   }));
 
@@ -648,9 +666,11 @@ async function dmmPropre(req, res) {
   const dmmMap = await cmmParProduit(etablissementId, "BL");
   const produits = await prisma.produit.findMany();
 
+  // produitId inclus explicitement : deux produits homonymes du catalogue ne
+  // doivent jamais être confondus une fois reconvertis en nom pour l'affichage.
   const resultat = produits
     .filter((p) => dmmMap[p.id])
-    .map((p) => ({ produit: p.nom, dmm: dmmMap[p.id] }));
+    .map((p) => ({ produitId: p.id, produit: p.nom, dmm: dmmMap[p.id] }));
 
   return res.json(resultat);
 }
