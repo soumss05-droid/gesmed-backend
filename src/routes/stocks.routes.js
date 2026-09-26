@@ -6,6 +6,7 @@ const {
   stockReseau,
   entreeStock,
   enregistrerDispensation,
+  rapportDispensations,
   calculerCmm,
   commandeSuggeree,
   croisementStock,
@@ -22,6 +23,7 @@ router.get("/dmm-propre", authentifier, dmmPropre);
 router.get("/commande-suggeree", authentifier, commandeSuggeree);
 router.get("/croisement", authentifier, croisementStock);
 router.get("/performance-moughataa", authentifier, performanceMoughataa);
+router.get("/dispensation/rapport", authentifier, autoriser("FORMATION_SANITAIRE"), rapportDispensations);
 router.post("/entree", authentifier, autoriser("GESTIONNAIRE_CAMEC", "ADMIN"), entreeStock);
 router.post("/dispensation", authentifier, autoriser("FORMATION_SANITAIRE"), enregistrerDispensation);
 

@@ -514,6 +514,72 @@ async function enregistrerDispensation(req, res) {
   return res.status(201).json({ message: "Dispensation enregistrée.", dispensation });
 }
 
+// GET /stocks/dispensation/rapport?dateDebut=YYYY-MM-DD&dateFin=YYYY-MM-DD
+// Rapport complet des dispensations de la formation sanitaire connectée,
+// sur une période ajustable dynamiquement (les deux dates sont optionnelles ;
+// sans elles, tout l'historique est renvoyé). Chaque formation sanitaire ne
+// voit que ses propres dispensations — c'est la contrepartie "lecture" de la
+// traçabilité obligatoire mise en place à l'enregistrement.
+async function rapportDispensations(req, res) {
+  const { etablissementId, role } = req.utilisateur;
+  if (role !== "FORMATION_SANITAIRE") {
+    return res.status(403).json({ erreur: "Seule une formation sanitaire peut consulter ce rapport." });
+  }
+
+  const { dateDebut, dateFin } = req.query;
+  const filtreDate = {};
+  if (dateDebut) filtreDate.gte = new Date(dateDebut);
+  if (dateFin) {
+    const fin = new Date(dateFin);
+    fin.setHours(23, 59, 59, 999); // Inclut toute la journée de fin.
+    filtreDate.lte = fin;
+  }
+
+  const dispensations = await prisma.dispensation.findMany({
+    where: {
+      etablissementId,
+      statut: "ACTIVE",
+      ...(Object.keys(filtreDate).length > 0 ? { dateDispensation: filtreDate } : {}),
+    },
+    include: { produit: true, utilisateur: { select: { nomComplet: true } } },
+    orderBy: { dateDispensation: "desc" },
+  });
+
+  const parType = {};
+  const parProduit = {};
+  let totalQuantite = 0;
+
+  for (const d of dispensations) {
+    totalQuantite += d.quantite;
+
+    if (!parType[d.typeBeneficiaire]) parType[d.typeBeneficiaire] = { nombre: 0, quantite: 0 };
+    parType[d.typeBeneficiaire].nombre += 1;
+    parType[d.typeBeneficiaire].quantite += d.quantite;
+
+    if (!parProduit[d.produit.nom]) parProduit[d.produit.nom] = 0;
+    parProduit[d.produit.nom] += d.quantite;
+  }
+
+  return res.json({
+    periode: { dateDebut: dateDebut || null, dateFin: dateFin || null },
+    totalDispensations: dispensations.length,
+    totalQuantite,
+    parType: Object.entries(parType).map(([type, v]) => ({ type, ...v })),
+    parProduit: Object.entries(parProduit)
+      .map(([produit, quantite]) => ({ produit, quantite }))
+      .sort((a, b) => b.quantite - a.quantite),
+    lignes: dispensations.map((d) => ({
+      id: d.id,
+      date: d.dateDispensation,
+      produit: d.produit.nom,
+      quantite: d.quantite,
+      typeBeneficiaire: d.typeBeneficiaire,
+      beneficiaire: d.beneficiaire,
+      enregistrePar: d.utilisateur?.nomComplet || null,
+    })),
+  });
+}
+
 // GET /stocks/cmm
 async function calculerCmm(req, res) {
   const { etablissementId, role } = req.utilisateur;
@@ -939,6 +1005,7 @@ module.exports = {
   stockReseau,
   entreeStock,
   enregistrerDispensation,
+  rapportDispensations,
   calculerCmm,
   calculerCommandeSuggereePourEtablissement,
   commandeSuggeree,
