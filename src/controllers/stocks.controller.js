@@ -1,5 +1,23 @@
 const prisma = require("../config/prisma");
 
+// Construit, à partir d'une liste de lots déjà triée en FEFO (date de
+// péremption croissante), une map clé -> {numeroLot, datePeremption} ne
+// gardant que le PREMIER lot rencontré pour chaque clé : c'est donc le
+// prochain lot à utiliser (celui qui périme le plus tôt) pour ce produit
+// (ou ce couple établissement+produit). Un produit peut avoir plusieurs
+// lots en stock ; on n'affiche ici que celui que la logique FEFO sortira
+// en premier, pour rester cohérent avec le reste du système.
+function prochainLotParCle(lotsTries, cleDe) {
+  const map = {};
+  for (const lot of lotsTries) {
+    const cle = cleDe(lot);
+    if (!map[cle]) {
+      map[cle] = { numeroLot: lot.numeroLot, datePeremption: lot.datePeremption };
+    }
+  }
+  return map;
+}
+
 function calculerStatut(quantite, seuilMin, seuilMax) {
   if (quantite <= 0) return "RUPTURE";
   if (quantite < seuilMin) return "SOUS_SEUIL";
@@ -70,8 +88,155 @@ async function recalculerStatutStock(produitId, etablissementId) {
   if (statut === stock.statut && seuilMin === stock.seuilMin && seuilMax === stock.seuilMax) return stock;
   return prisma.stock.update({
     where: { produitId_etablissementId: { produitId, etablissementId } },
-    data: { seuilMin, seuilMax, statut },
+    data: {
+      seuilMin,
+      seuilMax,
+      statut,
+      // Un vrai changement de statut ouvre un nouvel "épisode" : une
+      // justification antérieure à cet instant ne le couvre plus et devra
+      // être redemandée si ce nouvel épisode est une rupture/surstock.
+      ...(statut !== stock.statut ? { derniereMajStatut: new Date() } : {}),
+    },
   });
+}
+
+// Statuts pour lesquels une justification du gestionnaire est obligatoire.
+// SOUS_SEUIL est volontairement exclu : c'est un signal d'alerte précoce,
+// pas encore une situation anormale à justifier.
+const STATUTS_JUSTIFICATION_OBLIGATOIRE = ["RUPTURE", "SURSTOCK"];
+
+// Pour un établissement donné, renvoie les produits actuellement en
+// rupture/surstock qui n'ont pas (encore) de justification couvrant
+// l'épisode en cours (c-à-d. une justification enregistrée après le dernier
+// changement de statut détecté par recalculerStatutStock).
+async function produitsNonJustifies(etablissementId) {
+  const stocks = await prisma.stock.findMany({
+    where: { etablissementId, statut: { in: STATUTS_JUSTIFICATION_OBLIGATOIRE } },
+    include: { produit: true },
+  });
+  if (stocks.length === 0) return [];
+
+  const produitIds = stocks.map((s) => s.produitId);
+  const justifications = await prisma.justificationStock.findMany({
+    where: { etablissementId, produitId: { in: produitIds } },
+    orderBy: { dateCreation: "desc" },
+  });
+  const derniereParProduit = {};
+  for (const j of justifications) {
+    if (!derniereParProduit[j.produitId]) derniereParProduit[j.produitId] = j; // déjà triées, la plus récente d'abord
+  }
+
+  return stocks
+    .filter((stock) => {
+      const derniere = derniereParProduit[stock.produitId];
+      const justifieEpisodeActuel =
+        derniere && (!stock.derniereMajStatut || derniere.dateCreation >= stock.derniereMajStatut);
+      return !justifieEpisodeActuel;
+    })
+    .map((stock) => ({
+      produitId: stock.produitId,
+      produit: stock.produit.nom,
+      statut: stock.statut,
+      quantiteTotale: stock.quantiteTotale,
+    }));
+}
+
+// Regroupe, pour une liste d'établissements, la justification la plus
+// récente par couple établissement+produit — utilisée par stockReseau() pour
+// afficher aux autres niveaux (DRS, national...) pourquoi un produit est en
+// rupture/surstock quelque part dans le réseau, en lecture seule.
+async function derniereJustificationParCle(etablissementIds) {
+  if (etablissementIds.length === 0) return {};
+  const justifications = await prisma.justificationStock.findMany({
+    where: { etablissementId: { in: etablissementIds } },
+    orderBy: { dateCreation: "desc" },
+    include: { utilisateur: { select: { nomComplet: true } } },
+  });
+  const map = {};
+  for (const j of justifications) {
+    const cle = `${j.etablissementId}_${j.produitId}`;
+    if (!map[cle]) map[cle] = j; // déjà triées, la plus récente d'abord
+  }
+  return map;
+}
+
+// Détermine si la justification trouvée pour un stock couvre encore
+// l'épisode de rupture/surstock en cours (et non un épisode précédent déjà
+// résolu depuis).
+function justificationValidePour(stock, justification) {
+  if (!justification) return null;
+  const couvreEpisodeActuel = !stock.derniereMajStatut || justification.dateCreation >= stock.derniereMajStatut;
+  return couvreEpisodeActuel ? justification : null;
+}
+
+// POST /stocks/justification
+// Body : { produitId, texte }
+// Seul le gestionnaire de l'établissement concerné (déduit de sa session)
+// peut justifier son propre stock, et uniquement s'il est actuellement en
+// rupture ou en surstock.
+async function justifierStock(req, res) {
+  const { etablissementId, utilisateurId } = req.utilisateur;
+  const { produitId, texte } = req.body;
+
+  if (!produitId || !texte || !texte.trim()) {
+    return res.status(400).json({ erreur: "Produit et texte de la justification sont requis." });
+  }
+
+  const stock = await prisma.stock.findUnique({
+    where: { produitId_etablissementId: { produitId, etablissementId } },
+  });
+  if (!stock) {
+    return res.status(404).json({ erreur: "Stock introuvable pour ce produit à ton établissement." });
+  }
+  if (!STATUTS_JUSTIFICATION_OBLIGATOIRE.includes(stock.statut)) {
+    return res.status(400).json({ erreur: "Une justification n'est requise qu'en cas de rupture ou de surstock." });
+  }
+
+  const justification = await prisma.justificationStock.create({
+    data: {
+      produitId,
+      etablissementId,
+      statut: stock.statut,
+      texte: texte.trim(),
+      utilisateurId,
+    },
+  });
+
+  return res.status(201).json(justification);
+}
+
+// GET /stocks/justifications-requises
+// Liste, pour l'établissement de l'utilisateur connecté, les produits en
+// rupture/surstock qui attendent encore une justification pour l'épisode en
+// cours — à utiliser pour afficher un bandeau d'alerte bloquant côté client.
+async function justificationsRequises(req, res) {
+  const { etablissementId } = req.utilisateur;
+  const resultat = await produitsNonJustifies(etablissementId);
+  return res.json(resultat);
+}
+
+// GET /stocks/justification/:produitId
+// Historique daté complet des justifications pour un produit, à
+// l'établissement de l'utilisateur connecté.
+async function historiqueJustifications(req, res) {
+  const { etablissementId } = req.utilisateur;
+  const { produitId } = req.params;
+
+  const historique = await prisma.justificationStock.findMany({
+    where: { produitId, etablissementId },
+    orderBy: { dateCreation: "desc" },
+    include: { utilisateur: { select: { nomComplet: true } } },
+  });
+
+  return res.json(
+    historique.map((j) => ({
+      id: j.id,
+      statut: j.statut,
+      texte: j.texte,
+      auteur: j.utilisateur?.nomComplet || null,
+      date: j.dateCreation,
+    }))
+  );
 }
 
 // Crée un lot chez le destinataire d'une réception (réplique du lot
@@ -187,18 +352,35 @@ async function stockReseau(req, res) {
       where: { etablissementId, quantite: { gt: 0 }, datePeremption: { lt: maintenant } },
       include: { produit: true },
     });
+    const lotsDisponiblesCamec = await prisma.lot.findMany({
+      where: { etablissementId, quantite: { gt: 0 } },
+      orderBy: { datePeremption: "asc" }, // FEFO
+    });
+    const prochainLotCamec = prochainLotParCle(lotsDisponiblesCamec, (l) => l.produitId);
+    const justifCamec = await derniereJustificationParCle([etablissementId]);
     resultatCamec.push({
       etablissementId,
       etablissementNom: etablissement.nom,
       type: "CAMEC",
       regionNom: null,
       moughataaNom: null,
-      stocks: stocksCamec.map((s) => ({
-        produitId: s.produitId,
-        produit: s.produit.nom,
-        quantiteTotale: s.quantiteTotale,
-        statut: s.statut,
-      })),
+      stocks: stocksCamec.map((s) => {
+        const justif = justificationValidePour(s, justifCamec[`${etablissementId}_${s.produitId}`]);
+        return {
+          produitId: s.produitId,
+          produit: s.produit.nom,
+          quantiteTotale: s.quantiteTotale,
+          statut: s.statut,
+          seuilMin: s.seuilMin,
+          seuilMax: s.seuilMax,
+          numeroLot: prochainLotCamec[s.produitId]?.numeroLot || null,
+          datePeremption: prochainLotCamec[s.produitId]?.datePeremption || null,
+          justificationRequise: STATUTS_JUSTIFICATION_OBLIGATOIRE.includes(s.statut) && !justif,
+          derniereJustification: justif
+            ? { texte: justif.texte, auteur: justif.utilisateur?.nomComplet || null, date: justif.dateCreation }
+            : null,
+        };
+      }),
       lotsPerimes: lotsPerimesCamec.map((l) => ({
         produit: l.produit.nom,
         numeroLot: l.numeroLot,
@@ -231,6 +413,14 @@ async function stockReseau(req, res) {
         where: { etablissementId: { in: etabRegionIds }, quantite: { gt: 0 }, datePeremption: { lt: maintenant } },
         include: { produit: true },
       });
+      const lotsDisponiblesRegion = await prisma.lot.findMany({
+        where: { etablissementId: { in: etabRegionIds }, quantite: { gt: 0 } },
+        orderBy: { datePeremption: "asc" }, // FEFO
+      });
+      // Vue agrégée sur plusieurs établissements de la région : le "prochain
+      // lot" affiché par produit est celui qui périme le plus tôt tous
+      // établissements confondus, cohérent avec un total de quantité agrégé.
+      const prochainLotRegion = prochainLotParCle(lotsDisponiblesRegion, (l) => l.produitId);
 
       const totauxParProduit = {};
       for (const s of stocksRegion) {
@@ -249,6 +439,8 @@ async function stockReseau(req, res) {
           produit: v.produit,
           quantiteTotale: v.quantiteTotale,
           statut: null,
+          numeroLot: prochainLotRegion[produitId]?.numeroLot || null,
+          datePeremption: prochainLotRegion[produitId]?.datePeremption || null,
         })),
         lotsPerimes: lotsPerimesRegion.map((l) => ({
           produit: l.produit.nom,
@@ -301,6 +493,14 @@ async function stockReseau(req, res) {
       },
       include: inclureHierarchie,
     });
+  } else if (role === "FORMATION_SANITAIRE") {
+    // Pas de hiérarchie à afficher : juste son propre stock, dans le même
+    // format que les autres niveaux pour réutiliser tout le reste de la
+    // fonction (tri, lots périmés, nomAffichage, etc.) sans dupliquer de logique.
+    etablissementsCibles = await prisma.etablissement.findMany({
+      where: { id: etablissementId },
+      include: inclureHierarchie,
+    });
   } else {
     return res.status(403).json({ erreur: "Cette vue n'est pas disponible pour ton rôle." });
   }
@@ -334,6 +534,17 @@ async function stockReseau(req, res) {
     include: { produit: true },
   });
 
+  const lotsDisponibles = await prisma.lot.findMany({
+    where: {
+      etablissementId: { in: etablissementIds },
+      quantite: { gt: 0 },
+      ...(filtreProduit.produit ? { produit: filtreProduit.produit } : {}),
+    },
+    orderBy: { datePeremption: "asc" }, // FEFO
+  });
+  const prochainLot = prochainLotParCle(lotsDisponibles, (l) => `${l.etablissementId}_${l.produitId}`);
+  const justifications = await derniereJustificationParCle(etablissementIds);
+
   function nomAffichage(etab) {
     if (etab.type === "GAS_MOUGHATAA" && etab.moughataa?.nom) return `Moughataa ${etab.moughataa.nom}`;
     if (etab.type === "GAS_DRS" && etab.drs?.nom) return etab.drs.nom;
@@ -357,12 +568,24 @@ async function stockReseau(req, res) {
     moughataaNom: nomMoughataaGroupe(etab),
     stocks: stocks
       .filter((s) => s.etablissementId === etab.id)
-      .map((s) => ({
-        produitId: s.produitId,
-        produit: s.produit.nom,
-        quantiteTotale: s.quantiteTotale,
-        statut: s.statut,
-      })),
+      .map((s) => {
+        const cle = `${s.etablissementId}_${s.produitId}`;
+        const justif = justificationValidePour(s, justifications[cle]);
+        return {
+          produitId: s.produitId,
+          produit: s.produit.nom,
+          quantiteTotale: s.quantiteTotale,
+          statut: s.statut,
+          seuilMin: s.seuilMin,
+          seuilMax: s.seuilMax,
+          numeroLot: prochainLot[cle]?.numeroLot || null,
+          datePeremption: prochainLot[cle]?.datePeremption || null,
+          justificationRequise: STATUTS_JUSTIFICATION_OBLIGATOIRE.includes(s.statut) && !justif,
+          derniereJustification: justif
+            ? { texte: justif.texte, auteur: justif.utilisateur?.nomComplet || null, date: justif.dateCreation }
+            : null,
+        };
+      }),
     lotsPerimes: lotsPerimes
       .filter((l) => l.etablissementId === etab.id)
       .map((l) => ({
@@ -769,7 +992,10 @@ async function calculerCommandeSuggereePourEtablissement(etablissementId) {
   return produits.map((p) => {
     const cmmProduit = cmm[p.id] || 0;
     const stockDisponible = disponible[p.id] || 0;
-    const cible = n * cmmProduit;
+    // Cible = 2N x CMM : on vise une couverture de 2 fois le nombre de mois
+    // cible du niveau, pour amortir les variations de consommation entre
+    // deux commandes successives.
+    const cible = 2 * n * cmmProduit;
     const quantiteSuggeree = Math.max(0, Math.round(cible - stockDisponible));
     return {
       produitId: p.id,
@@ -1036,4 +1262,8 @@ module.exports = {
   performanceMoughataa,
   creerOuIncrementerLot,
   dmmPropre,
+  justifierStock,
+  justificationsRequises,
+  historiqueJustifications,
+  produitsNonJustifies,
 };

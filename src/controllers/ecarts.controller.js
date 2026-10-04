@@ -17,12 +17,16 @@ async function listerEcartsEnAttente(req, res) {
 }
 
 // POST /ecarts/:blLigneId/decision
-// Body : { decision: "debloquer" | "maintenir", motif }
+// Body : { decision: "debloquer" | "maintenir", motif, compensationRequise }
 // Pas de seuil chiffré : la décision reste au jugement du GAS Programme national ou de l'Auditeur.
+// "compensationRequise" n'est pris en compte que si "maintenir" est choisi sur un vrai manque
+// (quantiteEnvoyee > quantiteRecue) : il détermine si on notifie l'expéditeur pour qu'il
+// compense (ECART_A_COMPENSER) ou si on se contente d'enregistrer la perte en transit
+// (PerteTransit), sans la faire remonter.
 async function traiterEcart(req, res) {
   const { utilisateurId } = req.utilisateur;
   const { blLigneId } = req.params;
-  const { decision, motif } = req.body;
+  const { decision, motif, compensationRequise } = req.body;
 
   if (!motif || !motif.trim()) {
     return res.status(400).json({ erreur: "Un motif est obligatoire pour trancher un écart." });
@@ -38,10 +42,45 @@ async function traiterEcart(req, res) {
   }
 
   if (decision === "maintenir") {
+    const quantiteRecue = ligne.quantiteRecue ?? 0;
+    const ecartReel = ligne.quantiteEnvoyee - quantiteRecue;
+    const estUnManqueReel = ecartReel > 0;
+    const compensationDemandee = estUnManqueReel && Boolean(compensationRequise);
+
     const misAJour = await prisma.blLigne.update({
       where: { id: blLigneId },
-      data: { ecartStatut: "MAINTENU", ecartDecideurId: utilisateurId, ecartMotif: motif.trim() },
+      data: {
+        ecartStatut: "MAINTENU",
+        ecartDecideurId: utilisateurId,
+        ecartMotif: motif.trim(),
+        compensationRequise: compensationDemandee,
+      },
     });
+
+    if (estUnManqueReel) {
+      if (compensationDemandee) {
+        await prisma.notification.create({
+          data: {
+            etablissementId: ligne.bl.etablissementExpediteurId,
+            etablissementAuteurId: ligne.bl.etablissementDestinataireId,
+            type: "ECART_A_COMPENSER",
+            message: `Écart maintenu sur le BL n°${ligne.bl.numero} : ${ecartReel} unité(s) à compenser (motif : ${motif.trim()}).`,
+            produitId: ligne.produitId,
+          },
+        });
+      } else {
+        await prisma.perteTransit.create({
+          data: {
+            blLigneId: ligne.id,
+            produitId: ligne.produitId,
+            etablissementExpediteurId: ligne.bl.etablissementExpediteurId,
+            etablissementDestinataireId: ligne.bl.etablissementDestinataireId,
+            quantitePerdue: ecartReel,
+          },
+        });
+      }
+    }
+
     return res.json(misAJour);
   }
 

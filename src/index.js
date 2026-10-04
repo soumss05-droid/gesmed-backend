@@ -5,6 +5,8 @@ require("express-async-errors"); // Fait en sorte qu'une erreur dans une fonctio
 
 const authRoutes = require("./routes/auth.routes");
 const stocksRoutes = require("./routes/stocks.routes");
+const destructionsRoutes = require("./routes/destructions.routes");
+const verrouillageRoutes = require("./routes/verrouillage.routes");
 const requisitionsRoutes = require("./routes/requisitions.routes");
 const distributionRoutes = require("./routes/distribution.routes");
 const ecartsRoutes = require("./routes/ecarts.routes");
@@ -23,6 +25,8 @@ app.get("/health", (req, res) => res.json({ statut: "ok" }));
 
 app.use("/auth", authRoutes);
 app.use("/stocks", stocksRoutes);
+app.use("/stocks", destructionsRoutes);
+app.use("/verrouillage", verrouillageRoutes);
 app.use("/requisitions", requisitionsRoutes);
 app.use("/distribution", distributionRoutes);
 app.use("/ecarts", ecartsRoutes);
@@ -55,5 +59,5 @@ process.on("uncaughtException", (erreur) => {
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
-  console.log(`API GesMed démarrée sur le port ${PORT}`);
+  console.log(`API SYGIMS démarrée sur le port ${PORT}`);
 });

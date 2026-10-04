@@ -53,6 +53,17 @@ async function creerRequisition(req, res) {
   return res.status(201).json(requisition);
 }
 
+// Aplatit `produit` (objet Prisma) en simple chaîne (le nom) sur un tableau
+// de lignes — fonctionne pour les lignes de réquisition (RequisitionLigne)
+// et les lignes de bordereau de livraison (BlLigne), qui portent toutes
+// deux un champ `produit` une fois incluses. Convention commune à toutes
+// les routes qui renvoient des lignes au frontend, pour ne jamais faire
+// cohabiter `ligne.produit.nom` (objet) et `ligne.produit` (chaîne) selon
+// l'endroit.
+function aplatirLignes(lignes) {
+  return lignes.map((ligne) => ({ ...ligne, produit: ligne.produit.nom }));
+}
+
 // GET /requisitions/a-valider
 // Réquisitions en attente au niveau de l'utilisateur connecté (tous rôles
 // validateurs : GAS Moughataa, GAS DRS, GAS Programme national, CAMEC).
@@ -68,6 +79,12 @@ async function creerRequisition(req, res) {
 //    quantité normale calculée.
 // Fonctionne identiquement à tous les niveaux du circuit (FOSA→Moughataa,
 // Moughataa→DRS, DRS→Programme national).
+//
+// `produit` est ici systématiquement aplati en chaîne (le nom), pour
+// s'aligner sur la convention déjà utilisée par stocks.controller.js
+// (produitId + produit en string) plutôt que de renvoyer l'objet Prisma
+// complet — évite au frontend de devoir écrire `ligne.produit?.nom` d'un
+// côté et `ligne.produit` de l'autre selon l'endroit.
 async function listerAValider(req, res) {
   const { etablissementId } = req.utilisateur;
   const requisitions = await prisma.requisition.findMany({
@@ -109,7 +126,13 @@ async function listerAValider(req, res) {
       const statutStockDemandeur = statutMap[ligne.produitId] || null;
       const alerteSurstock =
         statutStockDemandeur === "SURSTOCK" || ligne.quantiteValidee > quantiteNormale * 1.5;
-      return { ...ligne, quantiteNormale, statutStockDemandeur, alerteSurstock };
+      return {
+        ...ligne,
+        produit: ligne.produit.nom,
+        quantiteNormale,
+        statutStockDemandeur,
+        alerteSurstock,
+      };
     });
   }
 
@@ -117,6 +140,9 @@ async function listerAValider(req, res) {
 }
 
 // GET /requisitions/mes-requisitions
+// `produit` est aplati en chaîne (via aplatirLignes) sur les lignes de la
+// réquisition principale ET sur celles de chaque réquisition fille en cas de
+// scission — même convention que listerAValider.
 async function listerMesRequisitions(req, res) {
   const { etablissementId } = req.utilisateur;
   const requisitions = await prisma.requisition.findMany({
@@ -133,7 +159,17 @@ async function listerMesRequisitions(req, res) {
     },
     orderBy: { dateCreation: "desc" },
   });
-  return res.json(requisitions);
+
+  const resultat = requisitions.map((r) => ({
+    ...r,
+    lignes: aplatirLignes(r.lignes),
+    requisitionsEnfants: r.requisitionsEnfants.map((fille) => ({
+      ...fille,
+      lignes: aplatirLignes(fille.lignes),
+    })),
+  }));
+
+  return res.json(resultat);
 }
 
 async function trouverEtablissementPrecedent(etabActuel, requisitionAJour) {
@@ -903,6 +939,10 @@ async function trouverFamilleRequisition(requisitionId) {
 // limité aux dossiers qui concernent l'établissement connecté — sa propre
 // demande, un niveau qu'il a eu à traiter, ou un BL où il apparaît comme
 // expéditeur ou destinataire. Admin et Auditeur voient tout.
+//
+// `produit` est aplati en chaîne (via aplatirLignes) à la fois sur les
+// lignes de chaque réquisition ET sur les lignes de chaque bordereau de
+// livraison lié — même convention que listerAValider / listerMesRequisitions.
 async function rechercherParNumero(req, res) {
   const { etablissementId, role } = req.utilisateur;
   const numero = Number(req.params.numero);
@@ -955,7 +995,16 @@ async function rechercherParNumero(req, res) {
     orderBy: { numero: "asc" },
   });
 
-  return res.json(familleDetaillee);
+  const resultat = familleDetaillee.map((r) => ({
+    ...r,
+    lignes: aplatirLignes(r.lignes),
+    bordereaux: r.bordereaux.map((bl) => ({
+      ...bl,
+      lignes: aplatirLignes(bl.lignes),
+    })),
+  }));
+
+  return res.json(resultat);
 }
 
 module.exports = {

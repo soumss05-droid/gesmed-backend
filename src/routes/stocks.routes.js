@@ -12,6 +12,9 @@ const {
   croisementStock,
   performanceMoughataa,
   dmmPropre,
+  justifierStock,
+  justificationsRequises,
+  historiqueJustifications,
 } = require("../controllers/stocks.controller");
 
 const router = express.Router();
@@ -24,7 +27,15 @@ router.get("/commande-suggeree", authentifier, commandeSuggeree);
 router.get("/croisement", authentifier, croisementStock);
 router.get("/performance-moughataa", authentifier, performanceMoughataa);
 router.get("/dispensation/rapport", authentifier, autoriser("FORMATION_SANITAIRE"), rapportDispensations);
-router.post("/entree", authentifier, autoriser("GESTIONNAIRE_CAMEC", "ADMIN"), entreeStock);
+router.get("/justifications-requises", authentifier, justificationsRequises);
+router.get("/justification/:produitId", authentifier, historiqueJustifications);
+router.post("/justification", authentifier, justifierStock);
+router.post(
+  "/entree",
+  authentifier,
+  autoriser("GESTIONNAIRE_CAMEC", "ADMIN", "GAS_MOUGHATAA", "GESTIONNAIRE_DRS", "FORMATION_SANITAIRE"),
+  entreeStock
+);
 router.post("/dispensation", authentifier, autoriser("FORMATION_SANITAIRE"), enregistrerDispensation);
 
 module.exports = router;

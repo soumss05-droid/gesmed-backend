@@ -59,7 +59,10 @@ async function listerEnAttenteReception(req, res) {
 
   const bls = await prisma.bordereauLivraison.findMany({
     where: { etablissementDestinataireId: etablissementId, statut: "ENVOYE" },
-    include: { lignes: { include: { produit: true, lot: true } } },
+    include: {
+      lignes: { include: { produit: true, lot: true } },
+      etablissementExpediteur: true,
+    },
   });
 
   return res.json(bls);
