@@ -463,8 +463,10 @@ async function stockReseau(req, res) {
       include: inclureHierarchie,
     });
   } else if (role === "GAS_PROGRAMME_NATIONAL") {
+    // Même périmètre que l'Admin : tous les établissements du réseau.
+    // Seuls les produits restent limités à son programme (voir filtreProduit).
     etablissementsCibles = await prisma.etablissement.findMany({
-      where: { type: "GAS_DRS" },
+      orderBy: { nom: "asc" },
       include: inclureHierarchie,
     });
   } else if (role === "GESTIONNAIRE_DRS" || role === "DIRECTEUR_DRS") {

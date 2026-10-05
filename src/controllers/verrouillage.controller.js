@@ -262,7 +262,7 @@ async function listerVerrous(req, res) {
     include: {
       etablissement: { select: { nom: true, type: true } },
       programme: { select: { nom: true } },
-      posePar: { select: { nomComplet: true, role: true } },
+      posePar: { select: { nomComplet: true } },
     },
     orderBy: { dateVerrouillage: "desc" },
   });
