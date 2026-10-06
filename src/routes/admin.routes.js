@@ -26,6 +26,8 @@ const {
   recalculerTousLesStatutsStock,
   reconcilierStocksAvecLots,
 } = require("../controllers/admin.controller");
+const { importerFosa } = require("../controllers/importFosa.controller");
+const { importerDrs, importerMoughataa } = require("../controllers/importStructures.controller");
 
 const router = express.Router();
 
@@ -34,6 +36,7 @@ router.use(authentifier, autoriser("ADMIN"));
 
 router.get("/drs", listerDrs);
 router.post("/drs", creerDrs);
+router.post("/drs/import", importerDrs);
 router.patch("/drs/:id", modifierDrs);
 router.delete("/drs/:id", supprimerDrs);
 
@@ -42,11 +45,13 @@ router.get("/roles", listerRoles);
 
 router.get("/etablissements", listerEtablissements);
 router.post("/etablissements", creerEtablissement);
+router.post("/etablissements/import-fosa", importerFosa);
 router.patch("/etablissements/:id", modifierEtablissement);
 router.delete("/etablissements/:id", supprimerEtablissement);
 
 router.get("/moughataa", listerMoughataa);
 router.post("/moughataa", creerMoughataa);
+router.post("/moughataa/import", importerMoughataa);
 router.patch("/moughataa/:id", modifierMoughataa);
 router.delete("/moughataa/:id", supprimerMoughataa);
 
