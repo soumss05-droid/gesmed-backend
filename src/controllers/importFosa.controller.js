@@ -148,7 +148,7 @@ async function traiterImport(req, res) {
 
   // Chargé une seule fois : toutes les Moughataa (pour retrouver la bonne par
   // son nom) et les FOSA existantes (pour éviter les doublons).
-  const moughataas = await prisma.moughataa.findMany({ select: { id: true, nom: true } });
+  const moughataas = await prisma.moughataa.findMany({ select: { id: true, nom: true, drsId: true } });
   const moughataasParNom = {};
   for (const m of moughataas) {
     const k = nomNormalise(m.nom);
@@ -249,6 +249,9 @@ async function traiterImport(req, res) {
             type: "FORMATION_SANITAIRE",
             aStockPhysique: true,
             moughataaId: moughataa.id,
+            // La DRS de la FOSA = celle de sa moughataa. Sans cela, les vues
+            // par DRS (stock réseau, filtres de l'administration) ne la voient pas.
+            drsId: moughataa.drsId,
           },
         });
         const utilisateur = await tx.utilisateur.create({

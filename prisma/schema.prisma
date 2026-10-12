@@ -575,3 +575,26 @@ model VerrouSaisieInitiale {
   @@index([etablissementId])
   @@map("verrous_saisie_initiale")
 }
+
+// ============================================================
+// Journal des créations faites par les GAS DRS (écran « Mon équipe » et
+// import en masse). Lecture par l'administrateur uniquement. Volontairement
+// SANS relation avec les autres tables : les noms sont copiés au moment de
+// l'action, pour rester lisibles même si un compte change ensuite.
+// ============================================================
+model JournalEquipe {
+  id               String   @id @default(uuid())
+  auteurId         String   @map("auteur_id")
+  auteurNom        String   @map("auteur_nom")
+  drsId            String   @map("drs_id")
+  drsNom           String   @map("drs_nom")
+  action           String
+  role             String?
+  etablissementNom String   @map("etablissement_nom")
+  compteNom        String   @map("compte_nom")
+  identifiant      String
+  lu               Boolean  @default(false)
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  @@map("journal_equipe")
+}

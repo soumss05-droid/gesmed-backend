@@ -15,6 +15,8 @@ const produitsRoutes = require("./routes/produits.routes");
 const adminRoutes = require("./routes/admin.routes");
 const inventairesRoutes = require("./routes/inventaires.routes");
 const notificationsRoutes = require("./routes/notifications.routes");
+const equipeRoutes = require("./routes/equipe.routes");
+const journalEquipeRoutes = require("./routes/journalEquipe.routes");
 
 const app = express();
 
@@ -35,6 +37,8 @@ app.use("/produits", produitsRoutes);
 app.use("/admin", adminRoutes);
 app.use("/inventaires", inventairesRoutes);
 app.use("/notifications", notificationsRoutes);
+app.use("/equipe", equipeRoutes);
+app.use("/journal-equipe", journalEquipeRoutes);
 
 // Gestion simple des erreurs non prévues.
 app.use((err, req, res, next) => {
