@@ -42,6 +42,7 @@ model Programme {
   etablissements Etablissement[]
   verrousSaisieInitiale VerrouSaisieInitiale[]
 
+  servicesProgramme   ServiceProgramme[]
   @@map("programmes")
 }
 
@@ -85,6 +86,8 @@ model Etablissement {
   demandesDestructionLots      DemandeDestructionLot[]
   verrousSaisieInitiale        VerrouSaisieInitiale[]
 
+  offresService       OffreService[]
+  eligibilitesService EligibiliteService[]
   @@map("etablissements")
 }
 
@@ -113,6 +116,7 @@ model Utilisateur {
   destructionsValidees  DemandeDestructionLot[] @relation("DestructionValidateur")
   verrousPoses     VerrouSaisieInitiale[] @relation("VerrouPosePar")
 
+  offresDeclarees     OffreService[]
   @@map("utilisateurs")
 }
 
@@ -598,4 +602,60 @@ model JournalEquipe {
   createdAt        DateTime @default(now()) @map("created_at")
 
   @@map("journal_equipe")
+}
+
+// ============================================================
+// Offre de service par programme
+// ============================================================
+
+enum DependanceService {
+  PRODUITS
+  EQUIPEMENT
+  PERSONNEL
+  AUTRE
+}
+
+model ServiceProgramme {
+  id           String               @id @default(uuid())
+  programmeId  String               @map("programme_id")
+  programme    Programme            @relation(fields: [programmeId], references: [id])
+  groupe       String?
+  nom          String
+  code         String               @unique
+  ciblePct     Int?                 @map("cible_pct")
+  dependance   DependanceService    @default(AUTRE)
+  ordre        Int                  @default(0)
+  actif        Boolean              @default(true)
+  createdAt    DateTime             @default(now()) @map("created_at")
+
+  offres       OffreService[]
+  eligibilites EligibiliteService[]
+
+  @@map("services_programme")
+}
+
+model OffreService {
+  id              String           @id @default(uuid())
+  serviceId       String           @map("service_id")
+  service         ServiceProgramme @relation(fields: [serviceId], references: [id])
+  etablissementId String           @map("etablissement_id")
+  etablissement   Etablissement    @relation(fields: [etablissementId], references: [id])
+  offert          Boolean
+  declareParId    String?          @map("declare_par_id")
+  declarePar      Utilisateur?     @relation(fields: [declareParId], references: [id])
+  updatedAt       DateTime         @default(now()) @updatedAt @map("updated_at")
+
+  @@unique([serviceId, etablissementId])
+  @@map("offres_service")
+}
+
+model EligibiliteService {
+  id              String           @id @default(uuid())
+  serviceId       String           @map("service_id")
+  service         ServiceProgramme @relation(fields: [serviceId], references: [id])
+  etablissementId String           @map("etablissement_id")
+  etablissement   Etablissement    @relation(fields: [etablissementId], references: [id])
+
+  @@unique([serviceId, etablissementId])
+  @@map("eligibilites_service")
 }
