@@ -423,6 +423,7 @@ enum TypeNotification {
   REJETEE_POUR_CORRECTION
   RUPTURE_STOCK
   ECART_A_COMPENSER
+  RELANCE
 }
 
 model Notification {

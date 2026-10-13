@@ -8,6 +8,7 @@ const {
   creerCommandeReapprovisionnement,
   rechercherParNumero,
 } = require("../controllers/requisitions.controller");
+const { relancerRequisition } = require("../controllers/relance.controller"); // relance
 
 const router = express.Router();
 
@@ -17,5 +18,6 @@ router.get("/a-valider", authentifier, listerAValider);
 router.get("/mes-requisitions", authentifier, listerMesRequisitions);
 router.get("/recherche/:numero", authentifier, rechercherParNumero);
 router.post("/:id/decision", authentifier, traiterDecision);
+router.post("/:id/relancer", authentifier, relancerRequisition); // relance
 
 module.exports = router;
