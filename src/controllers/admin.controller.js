@@ -16,6 +16,20 @@ const ROLES_DISPONIBLES = [
   "AUDITEUR",
 ];
 
+// Niveaux possibles d'une formation sanitaire (champ facultatif).
+const NIVEAUX_FOSA = [
+  "HOPITAL",
+  "CS_MOUGHATAA",
+  "CS_SECONDAIRE",
+  "PS_PRINCIPAL",
+  "PS_SECONDAIRE",
+  "UPEC_COMMUNAUTAIRE",
+];
+
+function niveauInvalide(niveau) {
+  return niveau !== undefined && niveau !== null && niveau !== "" && !NIVEAUX_FOSA.includes(niveau);
+}
+
 // GET /admin/drs — liste des DRS (pour les menus déroulants)
 async function listerDrs(req, res) {
   const drs = await prisma.drs.findMany({ orderBy: { nom: "asc" } });
@@ -77,10 +91,14 @@ async function creerMoughataa(req, res) {
 // programmeId est pertinent uniquement pour un établissement de type
 // GAS_PROGRAMME_NATIONAL (chaque GAS Programme national gère un seul programme).
 async function creerEtablissement(req, res) {
-  const { nom, type, aStockPhysique, drsId, moughataaId, programmeId, adresse, approvisionnementDirectCamec } = req.body;
+  const { nom, type, aStockPhysique, drsId, moughataaId, programmeId, adresse, approvisionnementDirectCamec, niveau } = req.body;
 
   if (!nom || !type) {
     return res.status(400).json({ erreur: "Nom et type requis." });
+  }
+
+  if (niveauInvalide(niveau)) {
+    return res.status(400).json({ erreur: `Niveau inconnu. Valeurs possibles : ${NIVEAUX_FOSA.join(", ")}.` });
   }
 
   const etablissement = await prisma.etablissement.create({
@@ -93,6 +111,7 @@ async function creerEtablissement(req, res) {
       programmeId: programmeId || null,
       adresse: adresse || null,
       approvisionnementDirectCamec: !!approvisionnementDirectCamec,
+      niveau: niveau || null,
     },
   });
 
@@ -104,7 +123,7 @@ async function creerEtablissement(req, res) {
 // corriger une fiche existante (ex. rattacher un DRS oublié à la création).
 async function modifierEtablissement(req, res) {
   const { id } = req.params;
-  const { nom, type, aStockPhysique, drsId, moughataaId, programmeId, adresse, actif, approvisionnementDirectCamec } = req.body;
+  const { nom, type, aStockPhysique, drsId, moughataaId, programmeId, adresse, actif, approvisionnementDirectCamec, niveau } = req.body;
 
   const donnees = {};
   if (nom !== undefined) donnees.nom = nom;
@@ -116,6 +135,12 @@ async function modifierEtablissement(req, res) {
   if (adresse !== undefined) donnees.adresse = adresse || null;
   if (actif !== undefined) donnees.actif = !!actif;
   if (approvisionnementDirectCamec !== undefined) donnees.approvisionnementDirectCamec = !!approvisionnementDirectCamec;
+  if (niveau !== undefined) {
+    if (niveauInvalide(niveau)) {
+      return res.status(400).json({ erreur: `Niveau inconnu. Valeurs possibles : ${NIVEAUX_FOSA.join(", ")}.` });
+    }
+    donnees.niveau = niveau || null;
+  }
 
   try {
     const etablissement = await prisma.etablissement.update({ where: { id }, data: donnees });

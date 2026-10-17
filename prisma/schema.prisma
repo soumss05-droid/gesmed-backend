@@ -68,6 +68,7 @@ model Etablissement {
   adresse                     String?
   actif                       Boolean           @default(true)
   approvisionnementDirectCamec Boolean          @default(false) @map("approvisionnement_direct_camec")
+  niveau                      NiveauFosa?
 
   userEtablissements          UserEtablissement[]
   lots                        Lot[]
@@ -658,4 +659,14 @@ model EligibiliteService {
 
   @@unique([serviceId, etablissementId])
   @@map("eligibilites_service")
+}
+
+// Niveau d'une formation sanitaire dans la pyramide sanitaire (facultatif).
+enum NiveauFosa {
+  HOPITAL
+  CS_MOUGHATAA
+  CS_SECONDAIRE
+  PS_PRINCIPAL
+  PS_SECONDAIRE
+  UPEC_COMMUNAUTAIRE
 }
