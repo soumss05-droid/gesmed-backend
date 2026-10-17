@@ -432,7 +432,7 @@ async function enregistrerEligibilite(req, res) {
     if (!service) return;
 
     const { etablissementIds } = req.body || {};
-    if (!Array.isArray(etablissementIds) || etablissementIds.length > 2000 || etablissementIds.some((i) => typeof i !== "string")) {
+    if (!Array.isArray(etablissementIds) || etablissementIds.length > 3000 || etablissementIds.some((i) => typeof i !== "string")) {
       return res.status(400).json({ erreur: "Liste de formations sanitaires invalide." });
     }
 
