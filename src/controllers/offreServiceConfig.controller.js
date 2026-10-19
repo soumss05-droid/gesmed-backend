@@ -386,6 +386,7 @@ async function lireEligibilite(req, res) {
         select: {
           id: true,
           nom: true,
+          niveau: true,
           drs: { select: { nom: true } },
           moughataa: { select: { nom: true, drs: { select: { nom: true } } } },
         },
@@ -404,6 +405,7 @@ async function lireEligibilite(req, res) {
         nom: f.nom,
         drs: nomDrs(f),
         moughataa: f.moughataa?.nom || null,
+        niveau: f.niveau || null,
         eligible: ids.has(f.id),
       }))
       .sort(
