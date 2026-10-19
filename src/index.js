@@ -18,6 +18,7 @@ const notificationsRoutes = require("./routes/notifications.routes");
 const equipeRoutes = require("./routes/equipe.routes");
 const journalEquipeRoutes = require("./routes/journalEquipe.routes");
 const offreServiceRoutes = require("./routes/offreService.routes"); // offre de service
+const couvertureRoutes = require("./routes/couverture.routes"); // indicateurs de couverture
 const offreServiceConfigRoutes = require("./routes/offreServiceConfig.routes"); // config offre
 
 const app = express();
@@ -42,6 +43,7 @@ app.use("/notifications", notificationsRoutes);
 app.use("/equipe", equipeRoutes);
 app.use("/journal-equipe", journalEquipeRoutes);
 app.use("/offre-service", offreServiceRoutes); // offre de service
+app.use("/couverture-offre", couvertureRoutes); // indicateurs de couverture
 app.use("/offre-service-config", offreServiceConfigRoutes); // config offre
 
 // Gestion simple des erreurs non prévues.
