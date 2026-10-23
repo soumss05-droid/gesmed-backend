@@ -16,4 +16,7 @@ router.get("/evolution-mouvements", authentifier, evolutionMouvements);
 router.get("/requisitions-kanban", authentifier, requisitionsKanban);
 router.get("/mouvements-detailles", authentifier, mouvementsDetailles);
 
+const { ficheSituation } = require("../controllers/fiche.controller");
+router.get("/fiche-situation", authentifier, ficheSituation);
+
 module.exports = router;

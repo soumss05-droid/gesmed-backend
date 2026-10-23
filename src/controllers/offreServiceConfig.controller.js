@@ -122,6 +122,7 @@ async function configuration(req, res) {
         nom: s.nom,
         ciblePct: s.ciblePct,
         actif: s.actif,
+        poids: s.poids,
         nbEligibles: eligiblesParService.get(s.id) || 0,
       });
     }
@@ -298,7 +299,7 @@ async function modifierService(req, res) {
     const service = await serviceDansPerimetre(perimetre, req.params.serviceId, res);
     if (!service) return;
 
-    const { ciblePct, actif, nom, groupe } = req.body || {};
+    const { ciblePct, actif, nom, groupe, poids } = req.body || {};
     const data = {};
 
     if (ciblePct !== undefined) {
@@ -346,6 +347,14 @@ async function modifierService(req, res) {
       data.groupe = groupeNet || null;
     }
 
+    if (poids !== undefined) {
+      const valeurPoids = Number(poids);
+      if (poids === null || poids === "" || !Number.isInteger(valeurPoids) || valeurPoids < 1 || valeurPoids > 5) {
+        return res.status(400).json({ erreur: "Le poids doit \u00eatre un nombre entier entre 1 et 5." });
+      }
+      data.poids = valeurPoids;
+    }
+
     if (actif !== undefined) {
       if (typeof actif !== "boolean") {
         return res.status(400).json({ erreur: "La valeur « actif » doit être oui ou non." });
@@ -360,7 +369,7 @@ async function modifierService(req, res) {
     const misAJour = await prisma.serviceProgramme.update({
       where: { id: service.id },
       data,
-      select: { id: true, nom: true, groupe: true, ciblePct: true, actif: true },
+      select: { id: true, nom: true, groupe: true, ciblePct: true, poids: true, actif: true },
     });
 
     console.log(`[OFFRE-CONFIG] ${new Date().toISOString()} — utilisateur ${req.utilisateur.utilisateurId} : service "${service.nom}" → ${JSON.stringify(data)}`);

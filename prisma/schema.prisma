@@ -624,6 +624,7 @@ model ServiceProgramme {
   nom          String
   code         String               @unique
   ciblePct     Int?                 @map("cible_pct")
+  poids        Int                  @default(1)
   dependance   DependanceService    @default(AUTRE)
   ordre        Int                  @default(0)
   actif        Boolean              @default(true)
@@ -645,6 +646,9 @@ model OffreService {
   declareParId    String?          @map("declare_par_id")
   declarePar      Utilisateur?     @relation(fields: [declareParId], references: [id])
   updatedAt       DateTime         @default(now()) @updatedAt @map("updated_at")
+  valeurValidee   Boolean?         @map("valeur_validee")
+  valideeParId    String?          @map("validee_par_id")
+  valideeLe       DateTime?        @map("validee_le")
 
   @@unique([serviceId, etablissementId])
   @@map("offres_service")

@@ -31,13 +31,35 @@ async function fosaDuCompte(req, res) {
   return etablissement;
 }
 
+// Statut d'une reponse : EN_ATTENTE (jamais traitee, ou modifiee apres la decision du MCM),
+// VALIDE (la decision confirme la reponse) ou CORRIGE (decision differente).
+function statutReponse(o) {
+  if (!o.valideeLe || o.updatedAt > o.valideeLe) return "EN_ATTENTE";
+  return o.valeurValidee === o.offert ? "VALIDE" : "CORRIGE";
+}
+
+function pourcentage(numerateur, denominateur) {
+  return denominateur > 0 ? Math.round((numerateur * 1000) / denominateur) / 10 : null;
+}
+
+// c = { num: points des services offerts (eligibles), el: points des services eligibles, tot: points de tous les services }
+function calculerScore(c) {
+  return {
+    points: c.num,
+    pointsEligibles: c.el,
+    pointsTotal: c.tot,
+    couvertureEligibles: pourcentage(c.num, c.el),
+    couvertureTotale: pourcentage(c.num, c.tot),
+  };
+}
+
 // GET /offre-service/mes-services
 async function mesServices(req, res) {
   try {
     const etablissement = await fosaDuCompte(req, res);
     if (!etablissement) return;
 
-    const [services, offres] = await Promise.all([
+    const [services, offres, eligibilites] = await Promise.all([
       prisma.serviceProgramme.findMany({
         where: { actif: true },
         orderBy: { ordre: "asc" },
@@ -45,11 +67,17 @@ async function mesServices(req, res) {
       }),
       prisma.offreService.findMany({
         where: { etablissementId: etablissement.id },
-        select: { serviceId: true, offert: true, updatedAt: true },
+        select: { serviceId: true, offert: true, valeurValidee: true, valideeLe: true, updatedAt: true },
+      }),
+      prisma.eligibiliteService.findMany({
+        where: { etablissementId: etablissement.id },
+        select: { serviceId: true },
       }),
     ]);
 
     const offreParService = new Map(offres.map((o) => [o.serviceId, o]));
+    const eligibleIds = new Set(eligibilites.map((e) => e.serviceId));
+    const cumul = { off: { num: 0, el: 0, tot: 0 }, prov: { num: 0, el: 0, tot: 0 } };
 
     // Regroupement programme > groupe > services, dans l'ordre d'affichage.
     const programmes = [];
@@ -66,16 +94,37 @@ async function mesServices(req, res) {
         programme.groupes.push(groupe);
       }
       const offre = offreParService.get(s.id);
+      const poids = s.poids || 1;
+      const eligible = eligibleIds.has(s.id);
+      const statut = offre ? statutReponse(offre) : null;
+      const officiel = offre ? offre.valeurValidee : null;
+      const provisoire = offre ? (statut === "EN_ATTENTE" ? offre.offert : officiel) : false;
+      cumul.off.tot += poids;
+      cumul.prov.tot += poids;
+      if (eligible) {
+        cumul.off.el += poids;
+        cumul.prov.el += poids;
+        if (officiel === true) cumul.off.num += poids;
+        if (provisoire === true) cumul.prov.num += poids;
+      }
       groupe.services.push({
         id: s.id,
         nom: s.nom,
         dependance: s.dependance,
         offert: offre ? offre.offert : null, // null = non renseigné
         misAJourLe: offre ? offre.updatedAt : null,
+        poids,
+        eligible,
+        statut,
+        officiel,
       });
     }
 
-    return res.json({ etablissement: { id: etablissement.id, nom: etablissement.nom }, programmes });
+    return res.json({
+      etablissement: { id: etablissement.id, nom: etablissement.nom },
+      programmes,
+      scores: { officiel: calculerScore(cumul.off), provisoire: calculerScore(cumul.prov) },
+    });
   } catch (erreur) {
     console.error("Erreur lors de la lecture des services de la FOSA :", erreur);
     return res.status(500).json({ erreur: "Erreur serveur lors du chargement des services." });
