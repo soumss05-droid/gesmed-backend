@@ -3,6 +3,7 @@ const { authentifier } = require("../middleware/auth");
 const { autoriser } = require("../middleware/authorize");
 const { perimetre, listerComptes, creerCompte, creerFosa } = require("../controllers/equipe.controller");
 const { importerFosaDrs } = require("../controllers/equipeImport.controller");
+const { importerMcmDrs } = require("../controllers/importMcm.controller");
 
 const router = express.Router();
 
@@ -13,6 +14,7 @@ router.get("/perimetre", perimetre);
 router.get("/comptes", listerComptes);
 router.post("/comptes", creerCompte);
 router.post("/fosa", creerFosa);
+router.post("/import-mcm", importerMcmDrs); // import en masse des MCM (simulation par defaut)
 router.post("/import-fosa", importerFosaDrs); // import en masse (simulation par défaut)
 
 module.exports = router;

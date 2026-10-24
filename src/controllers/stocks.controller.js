@@ -553,7 +553,7 @@ async function stockReseau(req, res) {
 
   function nomAffichage(etab) {
     if (etab.type === "GAS_MOUGHATAA" && etab.moughataa?.nom) return `Moughataa ${etab.moughataa.nom}`;
-    if (etab.type === "GAS_DRS" && etab.drs?.nom) return etab.drs.nom;
+    // Le depot regional garde son propre nom (ex. "Depot regional de l'Assaba").
     return etab.nom;
   }
 

@@ -131,6 +131,7 @@ enum Role {
   GAS_PROGRAMME_NATIONAL
   FORMATION_SANITAIRE
   AUDITEUR
+  CONSULTATION_FOSA
 }
 
 model UserEtablissement {

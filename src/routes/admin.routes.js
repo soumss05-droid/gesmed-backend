@@ -27,6 +27,7 @@ const {
   reconcilierStocksAvecLots,
 } = require("../controllers/admin.controller");
 const { importerFosa } = require("../controllers/importFosa.controller");
+const { importerMcmAdmin } = require("../controllers/importMcm.controller");
 const { importerDrs, importerMoughataa } = require("../controllers/importStructures.controller");
 
 const router = express.Router();
@@ -45,6 +46,7 @@ router.get("/roles", listerRoles);
 
 router.get("/etablissements", listerEtablissements);
 router.post("/etablissements", creerEtablissement);
+router.post("/etablissements/import-mcm", importerMcmAdmin);
 router.post("/etablissements/import-fosa", importerFosa);
 router.patch("/etablissements/:id", modifierEtablissement);
 router.delete("/etablissements/:id", supprimerEtablissement);
