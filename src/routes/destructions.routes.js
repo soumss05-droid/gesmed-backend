@@ -7,6 +7,9 @@ const {
   validerDestructionLot,
   historiqueDestructions,
   supprimerHistoriqueDestructions,
+  mesDemandesDestruction,
+  confirmerDestructionLot,
+  mesLotsDestruction,
 } = require("../controllers/destructions.controller");
 
 // Toutes les routes sont montées sous /stocks (voir index.js), au même
@@ -17,5 +20,8 @@ router.get("/lots/destructions/a-valider", authentifier, demandesDestructionAVal
 router.post("/lots/destructions/:demandeId/valider", authentifier, validerDestructionLot);
 router.get("/lots/destructions/historique", authentifier, historiqueDestructions);
 router.delete("/lots/destructions/historique", authentifier, supprimerHistoriqueDestructions);
+router.get("/lots/destructions/mes-demandes", authentifier, mesDemandesDestruction);
+router.post("/lots/destructions/:demandeId/confirmer", authentifier, confirmerDestructionLot);
+router.get("/lots/destructions/mes-lots", authentifier, mesLotsDestruction);
 
 module.exports = router;

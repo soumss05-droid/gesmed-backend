@@ -382,6 +382,7 @@ async function stockReseau(req, res) {
         };
       }),
       lotsPerimes: lotsPerimesCamec.map((l) => ({
+        id: l.id,
         produit: l.produit.nom,
         numeroLot: l.numeroLot,
         datePeremption: l.datePeremption,
@@ -443,6 +444,7 @@ async function stockReseau(req, res) {
           datePeremption: prochainLotRegion[produitId]?.datePeremption || null,
         })),
         lotsPerimes: lotsPerimesRegion.map((l) => ({
+          id: l.id,
           produit: l.produit.nom,
           numeroLot: l.numeroLot,
           datePeremption: l.datePeremption,
@@ -459,6 +461,7 @@ async function stockReseau(req, res) {
 
   if (role === "ADMIN") {
     etablissementsCibles = await prisma.etablissement.findMany({
+      where: { type: { not: "WILAYA" } },
       orderBy: { nom: "asc" },
       include: inclureHierarchie,
     });
@@ -466,6 +469,7 @@ async function stockReseau(req, res) {
     // Même périmètre que l'Admin : tous les établissements du réseau.
     // Seuls les produits restent limités à son programme (voir filtreProduit).
     etablissementsCibles = await prisma.etablissement.findMany({
+      where: { type: { not: "WILAYA" } },
       orderBy: { nom: "asc" },
       include: inclureHierarchie,
     });
@@ -478,7 +482,7 @@ async function stockReseau(req, res) {
     etablissementsCibles = await prisma.etablissement.findMany({
       where: {
         OR: [
-          { id: etablissementId },
+          { type: "GAS_DRS", drsId: etablissement.drsId },
           { type: "GAS_MOUGHATAA", drsId: etablissement.drsId },
           { type: "FORMATION_SANITAIRE", moughataaId: { in: moughataaIds } },
         ],
@@ -591,6 +595,7 @@ async function stockReseau(req, res) {
     lotsPerimes: lotsPerimes
       .filter((l) => l.etablissementId === etab.id)
       .map((l) => ({
+        id: l.id,
         produit: l.produit.nom,
         numeroLot: l.numeroLot,
         datePeremption: l.datePeremption,
@@ -1048,6 +1053,7 @@ async function croisementStock(req, res) {
 
   if (role === "ADMIN") {
     etablissementsCibles = await prisma.etablissement.findMany({
+      where: { type: { not: "WILAYA" } },
       include: { drs: true, moughataa: { include: { drs: true } } },
     });
     regroupementsAutorises = ["drs", "moughataa", "formationsanitaire"];
@@ -1072,7 +1078,7 @@ async function croisementStock(req, res) {
     etablissementsCibles = await prisma.etablissement.findMany({
       where: {
         OR: [
-          { id: etablissementId },
+          { type: "GAS_DRS", drsId: etablissement.drsId },
           { type: "GAS_MOUGHATAA", drsId: etablissement.drsId },
           { type: "FORMATION_SANITAIRE", moughataaId: { in: moughataaIds } },
         ],
@@ -1168,7 +1174,7 @@ async function perimetreEtablissementIds(etablissementId, role) {
     const etabs = await prisma.etablissement.findMany({
       where: {
         OR: [
-          { id: etablissementId },
+          { type: "GAS_DRS", drsId: etablissement.drsId },
           { type: "GAS_MOUGHATAA", drsId: etablissement.drsId },
           { type: "FORMATION_SANITAIRE", moughataaId: { in: moughataaIds } },
         ],

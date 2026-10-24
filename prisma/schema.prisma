@@ -52,6 +52,7 @@ enum TypeEtablissement {
   GAS_DRS
   GAS_MOUGHATAA
   FORMATION_SANITAIRE
+  WILAYA
 }
 
 model Etablissement {
@@ -429,6 +430,8 @@ enum TypeNotification {
   RUPTURE_STOCK
   ECART_A_COMPENSER
   RELANCE
+  DESTRUCTION_AUTORISEE
+  DESTRUCTION_REJETEE
 }
 
 model Notification {
@@ -527,6 +530,7 @@ enum StatutDemandeDestruction {
   EN_ATTENTE
   VALIDEE
   REJETEE
+  AUTORISEE
 }
 
 model DemandeDestructionLot {
@@ -537,6 +541,7 @@ model DemandeDestructionLot {
   etablissement         Etablissement            @relation(fields: [etablissementId], references: [id])
   quantiteDemandee      Int                      @map("quantite_demandee")
   motifDemande          String?                  @map("motif_demande")
+  cause                 String                   @default("PERIME")
   demandeurId           String                   @map("demandeur_id")
   demandeur             Utilisateur              @relation("DestructionDemandeur", fields: [demandeurId], references: [id])
   dateDemande           DateTime                 @default(now()) @map("date_demande")
