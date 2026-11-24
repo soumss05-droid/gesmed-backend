@@ -1,3 +1,4 @@
+const { idsDispensationsAnnulees } = require("./dispensationsAnnulees.helper");
 const prisma = require("../config/prisma");
 
 // Construit, à partir d'une liste de lots déjà triée en FEFO (date de
@@ -317,7 +318,7 @@ async function listerStocks(req, res) {
 
 // Fonction utilitaire réutilisable par les autres lots (réquisitions, réception)
 // pour sélectionner le lot à sortir en priorité selon la logique FEFO.
-async function selectionnerLotFEFO(produitId, etablissementId, quantiteNecessaire) {
+async function selectionnerLotFEFO(produitId, etablissementId, quantiteNecessaire, dejaPrisParLot) {
   const lots = await prisma.lot.findMany({
     where: { produitId, etablissementId, quantite: { gt: 0 } },
     orderBy: { datePeremption: "asc" },
@@ -327,7 +328,10 @@ async function selectionnerLotFEFO(produitId, etablissementId, quantiteNecessair
   let restant = quantiteNecessaire;
   for (const lot of lots) {
     if (restant <= 0) break;
-    const quantitePrise = Math.min(lot.quantite, restant);
+    const dejaPris = (dejaPrisParLot && dejaPrisParLot.get(lot.id)) || 0;
+    const disponibleLot = lot.quantite - dejaPris;
+    if (disponibleLot <= 0) continue;
+    const quantitePrise = Math.min(disponibleLot, restant);
     lotsChoisis.push({ lotId: lot.id, quantite: quantitePrise });
     restant -= quantitePrise;
   }
@@ -499,7 +503,7 @@ async function stockReseau(req, res) {
       },
       include: inclureHierarchie,
     });
-  } else if (role === "FORMATION_SANITAIRE") {
+  } else if (role === "FORMATION_SANITAIRE" || role === "MEDECIN_CHEF_CENTRE" || role === "RESPONSABLE_FORMATION_SANITAIRE") {
     // Pas de hiérarchie à afficher : juste son propre stock, dans le même
     // format que les autres niveaux pour réutiliser tout le reste de la
     // fonction (tri, lots périmés, nomAffichage, etc.) sans dupliquer de logique.
@@ -634,6 +638,17 @@ async function entreeStock(req, res) {
     return res.status(400).json({ erreur: "La quantité doit être positive." });
   }
 
+  if (
+    prixUnitaire === undefined ||
+    prixUnitaire === null ||
+    String(prixUnitaire).trim() === "" ||
+    !Number.isFinite(Number(prixUnitaire)) ||
+    Number(prixUnitaire) < 0
+  ) {
+    return res.status(400).json({ erreur: "Le prix unitaire est requis (0 si gratuit)." });
+  }
+
+
   let lot;
   try {
     lot = await creerOuIncrementerLot({
@@ -679,7 +694,64 @@ async function entreeStock(req, res) {
     data: { lotId: lot.id, type: "ENTREE", quantite: Number(quantite), referenceType: "MANUEL", utilisateurId },
   });
 
+  await rappelerReliquatsCamec(produitId, etablissementId);
   return res.status(201).json({ lot, stock: stockMisAJour });
+}
+
+// Rappel : quand du stock d'un produit arrive a la CAMEC, prevenir la CAMEC et
+// les etablissements dont une requisition attend un reliquat de ce produit.
+// N'interrompt jamais l'entree de stock en cas d'erreur.
+async function rappelerReliquatsCamec(produitId, etablissementId) {
+  try {
+    const etab = await prisma.etablissement.findUnique({ where: { id: etablissementId } });
+    if (!etab || etab.type !== "CAMEC") return;
+    const produit = await prisma.produit.findUnique({ where: { id: produitId } });
+    const stock = await prisma.stock.findUnique({
+      where: { produitId_etablissementId: { produitId, etablissementId } },
+    });
+    const disponible = stock ? stock.quantiteTotale : 0;
+    if (disponible <= 0) return;
+    const enAttente = await prisma.requisition.findMany({
+      where: {
+        niveauActuelId: etablissementId,
+        statut: "VALIDEE",
+        lignes: { some: { produitId, quantiteValidee: { gt: 0 }, quantiteManquante: { gt: 0 } } },
+      },
+      include: { lignes: { where: { produitId } } },
+    });
+    const nom = produit ? produit.nom : "ce produit";
+    for (const r of enAttente) {
+      const manque = r.lignes.reduce((acc, l) => acc + (l.quantiteValidee || 0), 0);
+      const cibles = [
+        {
+          id: etablissementId,
+          message: `Du stock de "${nom}" est maintenant disponible \u00e0 la CAMEC (${disponible}). La r\u00e9quisition N\u00b0${r.numero} attend un reliquat de ${manque} : relancez l'envoi.`,
+        },
+        {
+          id: r.etablissementDemandeurId,
+          message: `Du stock de "${nom}" est maintenant disponible \u00e0 la CAMEC. Votre r\u00e9quisition N\u00b0${r.numero} attend un reliquat de ${manque} ; l'envoi peut \u00eatre relanc\u00e9.`,
+        },
+      ];
+      for (const c of cibles) {
+        const dejaLa = await prisma.notification.findFirst({
+          where: { etablissementId: c.id, type: "RELANCE", requisitionId: r.id, produitId, lue: false },
+        });
+        if (dejaLa) continue;
+        await prisma.notification.create({
+          data: {
+            etablissementId: c.id,
+            etablissementAuteurId: etablissementId,
+            type: "RELANCE",
+            message: c.message,
+            requisitionId: r.id,
+            produitId,
+          },
+        });
+      }
+    }
+  } catch (e) {
+    console.error("Rappel de reliquat impossible :", e.message);
+  }
 }
 
 // POST /stocks/dispensation
@@ -710,8 +782,51 @@ async function enregistrerDispensation(req, res) {
     return res.status(400).json({ erreur: `Stock insuffisant : ${quantiteNonCouverte} unité(s) manquante(s).` });
   }
 
+  // Prix fige de la dispensation : cout des lots preleves + marge selon le niveau de la formation sanitaire.
+  const etabDispensation = await prisma.etablissement.findUnique({
+    where: { id: etablissementId },
+    select: { niveau: true },
+  });
+  const clesMarge = [];
+  if (etabDispensation && etabDispensation.niveau) clesMarge.push("marge_" + etabDispensation.niveau);
+  clesMarge.push("marge_pourcent");
+  const paramsMarge = await prisma.parametreSysteme.findMany({ where: { cle: { in: clesMarge } } });
+  const valeurMarge = (cle) => {
+    const p = paramsMarge.find((x) => x.cle === cle);
+    if (!p || String(p.valeur).trim() === "") return null;
+    const n = Number(p.valeur);
+    return Number.isFinite(n) && n >= 0 ? n : null;
+  };
+  let margeValeur = null;
+  for (const cle of clesMarge) {
+    const v = valeurMarge(cle);
+    if (v !== null) {
+      margeValeur = v;
+      break;
+    }
+  }
+  if (margeValeur === null) margeValeur = 0;
+  const lotsPrix = await prisma.lot.findMany({
+    where: { id: { in: lotsChoisis.map((l) => l.lotId) } },
+    select: { id: true, prixUnitaire: true },
+  });
+  const prixParLot = new Map(lotsPrix.map((l) => [l.id, l.prixUnitaire]));
+  let coutTotal = 0;
+  let prixInconnu = false;
+  for (const lc of lotsChoisis) {
+    const p = prixParLot.get(lc.lotId);
+    if (p === null || p === undefined) prixInconnu = true;
+    else coutTotal += lc.quantite * Number(p);
+  }
+  const montantFige = prixInconnu ? null : Math.round(coutTotal * (1 + margeValeur / 100) * 100) / 100;
+  const prixUnitaireFige =
+    montantFige === null ? null : Math.round((montantFige / Number(quantite)) * 100) / 100;
+
   const dispensation = await prisma.dispensation.create({
     data: {
+      montantTotal: montantFige,
+      prixUnitaire: prixUnitaireFige,
+      margePourcent: montantFige === null ? null : margeValeur,
       etablissementId,
       produitId,
       quantite: Number(quantite),
@@ -741,7 +856,7 @@ async function enregistrerDispensation(req, res) {
   });
   await recalculerStatutStock(produitId, etablissementId);
 
-  return res.status(201).json({ message: "Dispensation enregistrée.", dispensation });
+  return res.status(201).json({ message: "Dispensation enregistrée.", dispensation: { ...dispensation, prixUnitaireMoyen: dispensation.prixUnitaire } });
 }
 
 // GET /stocks/dispensation/rapport?dateDebut=YYYY-MM-DD&dateFin=YYYY-MM-DD
@@ -785,6 +900,17 @@ async function rapportDispensations(req, res) {
     orderBy: { dateDispensation: "desc" },
   });
 
+  // Prix des dispensations : valeurs figees a l'enregistrement (vides pour les anciennes).
+  const montantDe = (d) => (d.montantTotal === null || d.montantTotal === undefined ? null : Number(d.montantTotal));
+  let montantGeneral = 0;
+  let nbSansPrix = 0;
+  for (const d of dispensations) {
+    const m = montantDe(d);
+    if (m === null) nbSansPrix += 1;
+    else montantGeneral += m;
+  }
+  montantGeneral = Math.round(montantGeneral * 100) / 100;
+
   const parType = {};
   const parProduit = {};
   let totalQuantite = 0;
@@ -805,6 +931,8 @@ async function rapportDispensations(req, res) {
     periode: { dateDebut: dateDebut || null, dateFin: dateFin || null },
     totalDispensations: dispensations.length,
     totalQuantite,
+    montantTotalGeneral: montantGeneral,
+    nbSansPrix,
     parType: Object.entries(parType).map(([type, v]) => ({ type, ...v })),
     parProduit: Object.entries(parProduit)
       .map(([produit, quantite]) => ({ produit, quantite }))
@@ -817,6 +945,7 @@ async function rapportDispensations(req, res) {
       typeBeneficiaire: d.typeBeneficiaire,
       beneficiaire: d.beneficiaire,
       enregistrePar: d.utilisateur?.nomComplet || null,
+      montantTotal: montantDe(d),
     })),
   });
 }
@@ -829,7 +958,7 @@ async function calculerCmm(req, res) {
   let filtreFs = null;
   let filtreProgrammeId = null;
 
-  if (role === "FORMATION_SANITAIRE") {
+  if (role === "FORMATION_SANITAIRE" || role === "MEDECIN_CHEF_CENTRE" || role === "RESPONSABLE_FORMATION_SANITAIRE") {
     filtreFs = { id: etablissementId };
   } else if (role === "GAS_MOUGHATAA" || role === "MEDECIN_CHEF_MOUGHATAA") {
     filtreFs = { type: "FORMATION_SANITAIRE", moughataaId: etablissement.moughataaId };
@@ -851,10 +980,12 @@ async function calculerCmm(req, res) {
   const ilYA6Mois = new Date();
   ilYA6Mois.setMonth(ilYA6Mois.getMonth() - 6);
 
+  const annuleesIds = await idsDispensationsAnnulees();
   const mouvements = await prisma.mouvementStock.findMany({
     where: {
       type: "SORTIE",
       referenceType: "DISPENSATION",
+      ...(annuleesIds.length > 0 ? { OR: [{ referenceId: null }, { referenceId: { notIn: annuleesIds } }] } : {}),
       dateMouvement: { gte: ilYA6Mois },
       lot: {
         etablissementId: { in: fsIds },
@@ -925,39 +1056,68 @@ function fusionner(cible, source) {
   return cible;
 }
 
+// Stock disponible cumule d'un etablissement (lui-meme + niveaux en dessous).
+// Version rapide : quelques requetes groupees au lieu d'une requete par
+// etablissement (la base est distante, chaque aller-retour coute cher).
 async function stockDisponibleCumule(etablissement) {
-  const total = await stockPhysiqueParProduit(etablissement.id);
+  const ids = new Set([etablissement.id]);
+
+  async function idsFormations(moughataaIds) {
+    const liste = moughataaIds.filter((m) => m !== null && m !== undefined);
+    if (liste.length === 0) return [];
+    const fos = await prisma.etablissement.findMany({
+      where: { type: "FORMATION_SANITAIRE", moughataaId: { in: liste } },
+      select: { id: true },
+    });
+    return fos.map((f) => f.id);
+  }
 
   if (etablissement.type === "GAS_MOUGHATAA") {
-    const formationsSanitaires = await prisma.etablissement.findMany({
-      where: { type: "FORMATION_SANITAIRE", moughataaId: etablissement.moughataaId },
-    });
-    for (const fs of formationsSanitaires) {
-      fusionner(total, await stockPhysiqueParProduit(fs.id));
-    }
+    for (const id of await idsFormations([etablissement.moughataaId])) ids.add(id);
   }
 
-  if (etablissement.type === "GAS_DRS") {
-    const moughataas = await prisma.etablissement.findMany({
-      where: { type: "GAS_MOUGHATAA", drsId: etablissement.drsId },
-    });
-    for (const m of moughataas) {
-      fusionner(total, await stockDisponibleCumule(m));
+  if (etablissement.type === "GAS_DRS" || etablissement.type === "CAMEC") {
+    let drsIds = [];
+    if (etablissement.type === "GAS_DRS") {
+      drsIds = [etablissement.drsId].filter((d) => d !== null && d !== undefined);
+    } else {
+      const etabsDrs = await prisma.etablissement.findMany({
+        where: { type: "GAS_DRS" },
+        select: { id: true, drsId: true },
+      });
+      const vus = new Set();
+      for (const e of etabsDrs) {
+        if (e.drsId && !vus.has(e.drsId)) {
+          vus.add(e.drsId);
+          ids.add(e.id);
+        }
+      }
+      drsIds = Array.from(vus);
     }
+
+    const moughataas =
+      drsIds.length > 0
+        ? await prisma.etablissement.findMany({
+            where: { type: "GAS_MOUGHATAA", drsId: { in: drsIds } },
+            select: { id: true, moughataaId: true },
+          })
+        : [];
+    for (const m of moughataas) ids.add(m.id);
+    for (const id of await idsFormations(moughataas.map((m) => m.moughataaId))) ids.add(id);
   }
 
-  if (etablissement.type === "CAMEC") {
-    const drsListe = await prisma.drs.findMany();
-    for (const drs of drsListe) {
-      const etabDrs = await prisma.etablissement.findFirst({ where: { type: "GAS_DRS", drsId: drs.id } });
-      if (etabDrs) fusionner(total, await stockDisponibleCumule(etabDrs));
-    }
-  }
-
+  const sommes = await prisma.stock.groupBy({
+    by: ["produitId"],
+    where: { etablissementId: { in: Array.from(ids) } },
+    _sum: { quantiteTotale: true },
+  });
+  const total = {};
+  for (const s of sommes) total[s.produitId] = s._sum.quantiteTotale || 0;
   return total;
 }
 
 async function cmmParProduit(etablissementId, referenceType) {
+  const annuleesIds = referenceType === "DISPENSATION" ? await idsDispensationsAnnulees() : [];
   const ilYA6Mois = new Date();
   ilYA6Mois.setMonth(ilYA6Mois.getMonth() - 6);
 
@@ -967,6 +1127,7 @@ async function cmmParProduit(etablissementId, referenceType) {
       referenceType,
       dateMouvement: { gte: ilYA6Mois },
       lot: { etablissementId },
+      ...(annuleesIds.length > 0 ? { OR: [{ referenceId: null }, { referenceId: { notIn: annuleesIds } }] } : {}),
     },
     include: { lot: true },
   });

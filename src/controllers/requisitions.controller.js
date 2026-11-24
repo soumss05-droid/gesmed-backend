@@ -33,6 +33,17 @@ async function creerRequisition(req, res) {
     return res.status(500).json({ erreur: "Aucun GAS Moughataa trouvé pour cette formation sanitaire." });
   }
 
+  // Regroupe les lignes du meme produit (somme des quantites) pour eviter les doublons.
+  const quantiteParProduit = new Map();
+  for (const l of lignes) {
+    const quantite = Number(l.quantiteDemandee);
+    if (!l.produitId || !Number.isInteger(quantite) || quantite <= 0) {
+      return res.status(400).json({ erreur: "Chaque ligne doit avoir un produit et une quantit\u00e9 enti\u00e8re positive." });
+    }
+    quantiteParProduit.set(l.produitId, (quantiteParProduit.get(l.produitId) || 0) + quantite);
+  }
+  const lignesFusionnees = Array.from(quantiteParProduit, ([produitId, quantiteDemandee]) => ({ produitId, quantiteDemandee }));
+  
   const requisition = await prisma.requisition.create({
     data: {
       etablissementDemandeurId: etablissementId,
@@ -40,7 +51,7 @@ async function creerRequisition(req, res) {
       statut: "EN_ATTENTE",
       justification: justification || null,
       lignes: {
-        create: lignes.map((l) => ({
+        create: lignesFusionnees.map((l) => ({
           produitId: l.produitId,
           quantiteDemandee: l.quantiteDemandee,
           quantiteValidee: l.quantiteDemandee,
@@ -92,7 +103,7 @@ async function listerAValider(req, res) {
       niveauActuelId: etablissementId,
       statut: { in: ["EN_ATTENTE", "REJETEE_POUR_CORRECTION"] },
     },
-    include: { lignes: { include: { produit: true } }, etablissementDemandeur: true },
+    include: { lignes: { include: { produit: true } }, etablissementDemandeur: { include: { moughataa: true } } },
     orderBy: { dateCreation: "asc" },
   });
 
@@ -101,6 +112,9 @@ async function listerAValider(req, res) {
 
   for (const requisition of requisitions) {
     const demandeurId = requisition.etablissementDemandeurId;
+    // Wilaya du demandeur (directe, sinon via sa moughataa) : sert a proposer l'axe d'expedition.
+    const etabDem = requisition.etablissementDemandeur;
+    requisition.drsDemandeurId = etabDem ? etabDem.drsId || (etabDem.moughataa ? etabDem.moughataa.drsId : null) : null;
 
     if (!suggestionsParDemandeur.has(demandeurId)) {
       let suggestionMap = {};
@@ -150,10 +164,12 @@ async function listerMesRequisitions(req, res) {
     include: {
       lignes: { include: { produit: true } },
       niveauActuel: { select: { nom: true } },
+      axe: { select: { nom: true, frequenceJours: true, dureeLivraisonJours: true, prochainDepartPrevu: true, vehicule: true } },
       requisitionsEnfants: {
         include: {
           lignes: { include: { produit: true } },
           niveauActuel: { select: { nom: true } },
+          axe: { select: { nom: true, frequenceJours: true, dureeLivraisonJours: true, prochainDepartPrevu: true, vehicule: true } },
         },
       },
     },
@@ -354,6 +370,7 @@ async function livrerEnCascadeException({ etablissementCamecId, etablissementFin
           etablissementId: hop.versId,
           numeroLot: lb.lot.numeroLot,
           datePeremption: lb.lot.datePeremption,
+          prixUnitaire: lb.lot.prixUnitaire,
           quantite: lb.quantiteEnvoyee,
         });
         await prisma.mouvementStock.create({
@@ -445,17 +462,41 @@ async function executerValidationOuModification({ etablissementId, utilisateurId
   // CAMEC) ne vérifie son propre stock — la réquisition les traverse
   // intacte, pour ne remonter que jusqu'à la CAMEC.
   const repartition = [];
+  const attribueParProduit = new Map();
   for (const ligne of requisitionAJour.lignes) {
+    let stockVerifie = false;
     let disponible = 0;
     if (!estException || etabActuel.type === "CAMEC") {
+      stockVerifie = true;
       const stock = await prisma.stock.findUnique({
         where: { produitId_etablissementId: { produitId: ligne.produitId, etablissementId } },
       });
       disponible = stock ? stock.quantiteTotale : 0;
     }
-    const aLivrer = Math.min(ligne.quantiteValidee, disponible);
+    const dejaAttribue = attribueParProduit.get(ligne.produitId) || 0;
+    const disponibleRestant = Math.max(0, disponible - dejaAttribue);
+    const aLivrer = Math.min(ligne.quantiteValidee, disponibleRestant);
+    attribueParProduit.set(ligne.produitId, dejaAttribue + aLivrer);
     const aRemonter = ligne.quantiteValidee - aLivrer;
-    repartition.push({ ligne, aLivrer, aRemonter });
+    repartition.push({ ligne, aLivrer, aRemonter, disponible, stockVerifie });
+  }
+
+    // Besoin non satisfait : on garde, par ligne, le stock du niveau qui traite,
+  // ce qui est livre et ce qui manque faute de stock (uniquement si le stock
+  // a ete verifie a ce niveau). Sans effet sur le circuit en cas d'echec.
+  try {
+    await Promise.all(
+      repartition
+        .filter((r) => r.stockVerifie && !(r.ligne.quantiteValidee === 0 && r.ligne.quantiteLivree > 0))
+        .map((r) =>
+          prisma.requisitionLigne.update({
+            where: { id: r.ligne.id },
+            data: { stockAmontAuMoment: r.disponible, quantiteLivree: r.aLivrer, quantiteManquante: r.aRemonter },
+          })
+        )
+    );
+  } catch (e) {
+    console.error("Enregistrement du besoin non satisfait impossible :", e.message);
   }
 
   const lignesALivrer = repartition.filter((r) => r.aLivrer > 0);
@@ -480,12 +521,14 @@ async function executerValidationOuModification({ etablissementId, utilisateurId
       // au-delà de ce qui a été réellement prélevé, pour ne pas creuser
       // davantage cet écart à chaque livraison.
       const quantiteReelleParProduit = new Map();
+      const dejaPrisParLot = new Map();
       for (const { ligne, aLivrer } of lignesALivrer) {
-        const { lotsChoisis, quantiteNonCouverte } = await selectionnerLotFEFO(ligne.produitId, etablissementId, aLivrer);
+        const { lotsChoisis, quantiteNonCouverte } = await selectionnerLotFEFO(ligne.produitId, etablissementId, aLivrer, dejaPrisParLot);
         const quantiteReelle = lotsChoisis.reduce((acc, l) => acc + l.quantite, 0);
-        quantiteReelleParProduit.set(ligne.produitId, quantiteReelle);
+        quantiteReelleParProduit.set(ligne.produitId, (quantiteReelleParProduit.get(ligne.produitId) || 0) + quantiteReelle);
         for (const lotChoisi of lotsChoisis) {
           lignesBl.push({ produitId: ligne.produitId, lotId: lotChoisi.lotId, quantiteEnvoyee: lotChoisi.quantite });
+          dejaPrisParLot.set(lotChoisi.lotId, (dejaPrisParLot.get(lotChoisi.lotId) || 0) + lotChoisi.quantite);
         }
         if (quantiteNonCouverte > 0) {
           console.error(
@@ -518,6 +561,7 @@ async function executerValidationOuModification({ etablissementId, utilisateurId
       }
       for (const { ligne } of lignesALivrer) {
         const quantiteReelle = quantiteReelleParProduit.get(ligne.produitId) || 0;
+        quantiteReelleParProduit.delete(ligne.produitId);
         if (quantiteReelle === 0) continue;
         await prisma.stock.update({
           where: { produitId_etablissementId: { produitId: ligne.produitId, etablissementId } },
@@ -628,8 +672,9 @@ async function executerValidationOuModification({ etablissementId, utilisateurId
   const typeSuivant = ORDRE_CIRCUIT[indexActuel + 1];
 
   if (!typeSuivant) {
+    // RELIQUAT_SANS_DOUBLON : toutes les lignes sont remises a jour (0 pour une ligne deja livree en entier).
     await Promise.all(
-      lignesARemonter.map(({ ligne, aRemonter }) =>
+      repartition.map(({ ligne, aRemonter }) =>
         prisma.requisitionLigne.update({ where: { id: ligne.id }, data: { quantiteValidee: aRemonter } })
       )
     );
@@ -640,9 +685,7 @@ async function executerValidationOuModification({ etablissementId, utilisateurId
         etablissementAuteurId: etabActuel.id,
         type: typeNotif,
         message:
-          decision === "modifier"
-            ? `La réquisition N°${requisitionAJour.numero} a été modifiée au dernier niveau du circuit.`
-            : `La réquisition N°${requisitionAJour.numero} a été validée au dernier niveau du circuit.`,
+          `La r\u00e9quisition N\u00b0${requisitionAJour.numero} a \u00e9t\u00e9 ${decision === "modifier" ? "modifi\u00e9e" : "valid\u00e9e"} au dernier niveau du circuit. Stock insuffisant : ${decrireEcarts(repartition)}. Le reliquat reste en attente ; un rappel sera envoy\u00e9 d\u00e8s que du stock sera disponible \u00e0 la CAMEC.`,
         requisitionId,
       });
     }
@@ -738,10 +781,51 @@ async function executerValidationOuModification({ etablissementId, utilisateurId
   };
 }
 
+// Association d'une requisition a un axe d'expedition (CAMEC) : la requisition
+// reste a la CAMEC (VALIDEE), le stock ne bouge pas. La livraison reelle se fait
+// au depart de l'axe, par le meme chemin que la validation (distribution).
+async function associerRequisitionAAxe({ etabActuel, utilisateurId, requisitionId, axeId, decision, lignes }) {
+  const axe = await prisma.axe.findUnique({ where: { id: axeId } });
+  if (!axe || !axe.actif) throw new ErreurMetier(400, "Axe d'exp\u00e9dition introuvable ou inactif.");
+
+  if (Array.isArray(lignes)) {
+    await Promise.all(
+      lignes.map((l) =>
+        prisma.requisitionLigne.update({
+          where: { id: l.requisitionLigneId },
+          data: { quantiteValidee: l.quantiteValidee },
+        })
+      )
+    );
+  }
+
+  const requisitionAJour = await prisma.requisition.findUnique({
+    where: { id: requisitionId },
+    include: { lignes: { include: { produit: true } } },
+  });
+  const misAJour = await prisma.requisition.update({
+    where: { id: requisitionId },
+    data: { statut: "VALIDEE", axeId: axe.id },
+  });
+
+  const etablissementPrecedent = await trouverEtablissementPrecedent(etabActuel, requisitionAJour);
+  if (etablissementPrecedent) {
+    await creerNotification({
+      etablissementId: etablissementPrecedent.id,
+      etablissementAuteurId: etabActuel.id,
+      type: decision === "modifier" ? "MODIFIEE" : "VALIDEE",
+      message: `La r\u00e9quisition N\u00b0${requisitionAJour.numero} a \u00e9t\u00e9 ${decision === "modifier" ? "modifi\u00e9e" : "valid\u00e9e"} par la CAMEC : exp\u00e9dition pr\u00e9vue avec l'axe ${axe.nom}.`,
+      requisitionId,
+    });
+  }
+
+  return { requisition: misAJour, axe: { id: axe.id, nom: axe.nom }, associeAAxe: true, bordereauLivraison: null, livreeDirectement: false };
+}
+
 async function traiterDecision(req, res) {
   const { etablissementId, role, utilisateurId } = req.utilisateur;
   const { id } = req.params;
-  const { decision, lignes } = req.body;
+  const { decision, lignes, axeId } = req.body;
 
   const requisition = await prisma.requisition.findUnique({ where: { id } });
   if (!requisition || requisition.niveauActuelId !== etablissementId) {
@@ -783,6 +867,22 @@ async function traiterDecision(req, res) {
     });
 
     return res.json(misAJour);
+  }
+
+  if (axeId && (decision === "valider" || decision === "modifier")) {
+    if (etabActuel.type !== "CAMEC") {
+      return res.status(400).json({ erreur: "L'association \u00e0 un axe n'est possible qu'\u00e0 la CAMEC." });
+    }
+    try {
+      const resultat = await associerRequisitionAAxe({ etabActuel, utilisateurId, requisitionId: id, axeId, decision, lignes });
+      return res.json(resultat);
+    } catch (erreur) {
+      if (erreur instanceof ErreurMetier) {
+        return res.status(erreur.statut).json({ erreur: erreur.message });
+      }
+      console.error("Erreur lors de l'association \u00e0 un axe :", erreur);
+      return res.status(500).json({ erreur: "Erreur serveur lors de l'association \u00e0 un axe." });
+    }
   }
 
   if (decision === "valider" || decision === "modifier") {
@@ -860,7 +960,7 @@ async function creerCommandeReapprovisionnement(req, res) {
       include: { lignes: true },
     });
 
-    return res.status(201).json({ requisitions: [requisition] });
+    return res.status(201).json({ etablissementNom: etablissement.nom, requisitions: [{ ...requisition, niveauActuel: { nom: gasDrs.nom } }] });
   }
 
   if (etablissement.type !== "GAS_DRS") {
@@ -905,10 +1005,10 @@ async function creerCommandeReapprovisionnement(req, res) {
       },
       include: { lignes: true },
     });
-    requisitionsCreees.push(requisition);
+    requisitionsCreees.push({ ...requisition, niveauActuel: { nom: etabDest.nom } });
   }
 
-  return res.status(201).json({ requisitions: requisitionsCreees });
+  return res.status(201).json({ etablissementNom: etablissement.nom, requisitions: requisitionsCreees });
 }
 
 // Remonte à la racine de la famille d'une réquisition (elle a pu être

@@ -29,6 +29,8 @@ const {
 const { importerFosa } = require("../controllers/importFosa.controller");
 const { importerMcmAdmin } = require("../controllers/importMcm.controller");
 const { importerDrs, importerMoughataa } = require("../controllers/importStructures.controller");
+const { lireMarges, enregistrerMarges } = require("../controllers/marges.controller");
+const { listerProduits, modifierProduit, supprimerProduit } = require("../controllers/produitsAdmin.controller");
 
 const router = express.Router();
 
@@ -69,5 +71,14 @@ router.get("/stocks", listerTousLesLots);
 
 router.post("/recalculer-statuts-stock", recalculerTousLesStatutsStock);
 router.post("/reconcilier-stocks-lots", reconcilierStocksAvecLots);
+
+// Marges de benefice appliquees a la dispensation (par niveau de formation sanitaire).
+router.get("/marges", lireMarges);
+router.put("/marges", enregistrerMarges);
+
+// Gestion des produits (lister, modifier, supprimer si jamais utilise).
+router.get("/produits", listerProduits);
+router.patch("/produits/:id", modifierProduit);
+router.delete("/produits/:id", supprimerProduit);
 
 module.exports = router;

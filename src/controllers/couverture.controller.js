@@ -241,6 +241,24 @@ async function couverture(req, res) {
       parMoughataa: listeMoughataas.map((m) => ({ nom: m.nom, drs: m.drs, ...calculer(s.id, m.fosas) })),
     }));
 
+    // Detail par FOSA pour un seul service (?serviceId=...) : sert a colorer la carte du stock.
+    let detailService = null;
+    const serviceDemande = typeof req.query.serviceId === "string" ? req.query.serviceId : "";
+    if (serviceDemande && eligibles.has(serviceDemande)) {
+      detailService = { serviceId: serviceDemande, offrent: [], nonOffrent: [], nonRenseignes: [], horsEligibilite: [] };
+      for (const f of fosas) {
+        const estEligible = eligibles.get(serviceDemande).has(f.id);
+        const reponse = reponses.get(serviceDemande).get(f.id);
+        if (!estEligible) {
+          if (reponse === true) detailService.horsEligibilite.push(f.id);
+          continue;
+        }
+        if (reponse === true) detailService.offrent.push(f.id);
+        else if (reponse === false) detailService.nonOffrent.push(f.id);
+        else detailService.nonRenseignes.push(f.id);
+      }
+    }
+
     // Niveau FOSA : services offerts rapportes aux services eligibles et au total des services.
     const nbServices = services.length;
     const resultatFosas = fosas
@@ -278,6 +296,7 @@ async function couverture(req, res) {
       totalFosa: fosas.length,
       nbServices,
       services: resultatServices,
+      detail: detailService,
       fosas: resultatFosas,
       genereLe: new Date().toISOString(),
     });

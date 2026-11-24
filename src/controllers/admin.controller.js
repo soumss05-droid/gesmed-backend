@@ -13,6 +13,8 @@ const ROLES_DISPONIBLES = [
   "MEDECIN_CHEF_MOUGHATAA",
   "GAS_PROGRAMME_NATIONAL",
   "FORMATION_SANITAIRE",
+  "MEDECIN_CHEF_CENTRE",
+  "RESPONSABLE_FORMATION_SANITAIRE",
   "AUDITEUR",
 ];
 
@@ -24,6 +26,7 @@ const NIVEAUX_FOSA = [
   "PS_PRINCIPAL",
   "PS_SECONDAIRE",
   "UPEC_COMMUNAUTAIRE",
+  "AUTRE",
 ];
 
 function niveauInvalide(niveau) {
@@ -123,7 +126,7 @@ async function creerEtablissement(req, res) {
 // corriger une fiche existante (ex. rattacher un DRS oublié à la création).
 async function modifierEtablissement(req, res) {
   const { id } = req.params;
-  const { nom, type, aStockPhysique, drsId, moughataaId, programmeId, adresse, actif, approvisionnementDirectCamec, niveau } = req.body;
+  const { nom, type, aStockPhysique, drsId, moughataaId, programmeId, adresse, actif, approvisionnementDirectCamec, niveau, latitude, longitude } = req.body;
 
   const donnees = {};
   if (nom !== undefined) donnees.nom = nom;
@@ -133,6 +136,18 @@ async function modifierEtablissement(req, res) {
   if (moughataaId !== undefined) donnees.moughataaId = moughataaId || null;
   if (programmeId !== undefined) donnees.programmeId = programmeId || null;
   if (adresse !== undefined) donnees.adresse = adresse || null;
+  if (latitude !== undefined || longitude !== undefined) {
+    const vide = (v) => v === undefined || v === null || String(v).trim() === "";
+    const lat = vide(latitude) ? null : Number(String(latitude).replace(",", "."));
+    const lon = vide(longitude) ? null : Number(String(longitude).replace(",", "."));
+    const incomplet = (lat === null) !== (lon === null);
+    const horsLimites = lat !== null && (!Number.isFinite(lat) || !Number.isFinite(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180);
+    if (incomplet || horsLimites) {
+      return res.status(400).json({ erreur: "Coordonn\u00e9es GPS invalides : latitude et longitude doivent \u00eatre deux nombres, ou rester vides toutes les deux." });
+    }
+    donnees.latitude = lat;
+    donnees.longitude = lon;
+  }
   if (actif !== undefined) donnees.actif = !!actif;
   if (approvisionnementDirectCamec !== undefined) donnees.approvisionnementDirectCamec = !!approvisionnementDirectCamec;
   if (niveau !== undefined) {

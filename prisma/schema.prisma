@@ -19,6 +19,10 @@ model Drs {
   moughataas     Moughataa[]
   etablissements Etablissement[]
 
+  axeId           String?         @map("axe_id")
+  ordreAxe        Int?            @map("ordre_axe")
+  axe             Axe?            @relation(fields: [axeId], references: [id])
+
   @@map("drs")
 }
 
@@ -70,6 +74,8 @@ model Etablissement {
   actif                       Boolean           @default(true)
   approvisionnementDirectCamec Boolean          @default(false) @map("approvisionnement_direct_camec")
   niveau                      NiveauFosa?
+  latitude                    Float?
+  longitude                   Float?
 
   userEtablissements          UserEtablissement[]
   lots                        Lot[]
@@ -132,6 +138,8 @@ enum Role {
   FORMATION_SANITAIRE
   AUDITEUR
   CONSULTATION_FOSA
+  MEDECIN_CHEF_CENTRE
+  RESPONSABLE_FORMATION_SANITAIRE
 }
 
 model UserEtablissement {
@@ -160,6 +168,7 @@ model Produit {
   seuilMinDefaut   Int       @map("seuil_min_defaut")
   seuilMaxDefaut   Int       @map("seuil_max_defaut")
   programmeId      String    @map("programme_id")
+  categorie        String?
   programme        Programme @relation(fields: [programmeId], references: [id])
 
   lots             Lot[]
@@ -288,6 +297,8 @@ model Requisition {
   lignes                 RequisitionLigne[]
   bordereaux             BordereauLivraison[]
   notifications          Notification[]
+  axeId                  String?           @map("axe_id")
+  axe                    Axe?              @relation(fields: [axeId], references: [id])
 
   @@map("requisitions")
 }
@@ -300,6 +311,9 @@ model RequisitionLigne {
   produit           Produit     @relation(fields: [produitId], references: [id])
   quantiteDemandee  Int         @map("quantite_demandee")
   quantiteValidee   Int         @map("quantite_validee")
+  quantiteLivree     Int?        @map("quantite_livree")
+  quantiteManquante  Int?        @map("quantite_manquante")
+  stockAmontAuMoment Int?        @map("stock_amont_au_moment")
 
   @@map("requisition_lignes")
 }
@@ -487,6 +501,9 @@ model Dispensation {
   statut            StatutDispensation  @default(ACTIVE)
   motifAnnulation   String?             @map("motif_annulation")
 
+  montantTotal      Decimal?            @map("montant_total") @db.Decimal(14, 2)
+  prixUnitaire      Decimal?            @map("prix_unitaire") @db.Decimal(12, 2)
+  margePourcent     Decimal?            @map("marge_pourcent") @db.Decimal(5, 2)
   @@map("dispensations")
 }
 
@@ -679,4 +696,37 @@ enum NiveauFosa {
   PS_PRINCIPAL
   PS_SECONDAIRE
   UPEC_COMMUNAUTAIRE
+  AUTRE
+}
+
+// ============================================================
+// Parametres du systeme (ex. marge_pourcent, reglee par l'administrateur)
+// ============================================================
+model ParametreSysteme {
+  cle           String   @id
+  valeur        String
+  misAJourPar   String?  @map("mis_a_jour_par")
+  dateMiseAJour DateTime @default(now()) @map("date_mise_a_jour")
+
+  @@map("parametres_systeme")
+}
+
+// Axes d'expedition de la CAMEC : regroupement de requisitions a expedier ensemble.
+model Axe {
+  id           String        @id @default(uuid())
+  nom          String
+  code         String        @unique
+  actif        Boolean       @default(true)
+  createdAt    DateTime      @default(now()) @map("created_at")
+  requisitions Requisition[]
+
+  frequenceJours       Int?      @map("frequence_jours")
+  dureeLivraisonJours  Int?      @map("duree_livraison_jours")
+  dernierDepartAt      DateTime? @map("dernier_depart_at")
+  vehicule             String?   // MINIBUS ou CAMION
+  prochainDepartPrevu  DateTime? @map("prochain_depart_prevu")
+
+  drs                  Drs[]
+
+  @@map("axes")
 }

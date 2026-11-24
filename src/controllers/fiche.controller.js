@@ -1,3 +1,4 @@
+const { idsDispensationsAnnulees } = require("./dispensationsAnnulees.helper");
 const prisma = require("../config/prisma");
 const { perimetreEtablissementIds } = require("./stocks.controller");
 
@@ -47,6 +48,7 @@ async function ficheSituation(req, res) {
       ? { OR: [{ etablissementDemandeurId: { in: ids } }, { niveauActuelId: etablissementId }] }
       : {};
 
+    const annuleesIds = await idsDispensationsAnnulees();
     const [structure, stocks, mouvements, lotsAVenir, lotsPerimes, requisitions] = await Promise.all([
       etablissementId
         ? prisma.etablissement.findUnique({ where: { id: etablissementId }, select: { nom: true, type: true } })
@@ -62,6 +64,7 @@ async function ficheSituation(req, res) {
         where: {
           dateMouvement: { gte: depart },
           type: { in: ["ENTREE", "SORTIE"] },
+          ...(annuleesIds.length > 0 ? { OR: [{ referenceId: null }, { referenceId: { notIn: annuleesIds } }] } : {}),
           lot: filtreEtab,
         },
         select: {
@@ -151,6 +154,31 @@ async function ficheSituation(req, res) {
     }
 
     // ---------- Situation du stock par produit ----------
+    // Repli pour la duree de rupture : si la date de changement de statut est vide,
+    // on prend la date du dernier mouvement des lots de ce produit dans cet etablissement.
+    const dateRepliParStock = new Map();
+    const stocksSansDate = stocks.filter((s) => s.statut === "RUPTURE" && !s.derniereMajStatut);
+    if (stocksSansDate.length > 0) {
+      const lotsConcernes = await prisma.lot.findMany({
+        where: { OR: stocksSansDate.map((s) => ({ produitId: s.produitId, etablissementId: s.etablissementId })) },
+        select: { id: true, produitId: true, etablissementId: true },
+      });
+      const cleParLot = new Map(lotsConcernes.map((l) => [l.id, l.produitId + "|" + l.etablissementId]));
+      if (cleParLot.size > 0) {
+        const derniers = await prisma.mouvementStock.groupBy({
+          by: ["lotId"],
+          where: { lotId: { in: [...cleParLot.keys()] } },
+          _max: { dateMouvement: true },
+        });
+        for (const g of derniers) {
+          const cle = cleParLot.get(g.lotId);
+          const d = g._max.dateMouvement;
+          if (!cle || !d) continue;
+          const actuelle = dateRepliParStock.get(cle);
+          if (!actuelle || d > actuelle) dateRepliParStock.set(cle, d);
+        }
+      }
+    }
     const parProduit = new Map();
     for (const s of stocks) {
       const p = parProduit.get(s.produitId) || {
@@ -169,8 +197,9 @@ async function ficheSituation(req, res) {
       p.structures += 1;
       if (s.statut === "RUPTURE") {
         p.enRupture += 1;
-        if (s.derniereMajStatut) {
-          const joursRupture = Math.max(0, Math.floor((maintenant.getTime() - new Date(s.derniereMajStatut).getTime()) / JOUR));
+        const dateRupture = s.derniereMajStatut || dateRepliParStock.get(s.produitId + "|" + s.etablissementId);
+        if (dateRupture) {
+          const joursRupture = Math.max(0, Math.floor((maintenant.getTime() - new Date(dateRupture).getTime()) / JOUR));
           if (p.joursRuptureMax === null || joursRupture > p.joursRuptureMax) p.joursRuptureMax = joursRupture;
         }
       } else if (s.statut === "SOUS_SEUIL") p.sousSeuil += 1;

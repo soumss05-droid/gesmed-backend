@@ -1,2 +1,24 @@
 node_modules
 .env
+# Fichiers sensibles ou temporaires (ne jamais commiter)
+scripts/MOTS-DE-PASSE-*
+scripts/plan-import-*
+scripts/sauvegarde-*
+scripts/assaba-*.json
+scripts/creation-ps-assaba-*.json
+scripts/brakna-*.json
+
+# Sauvegardes, scripts jetables et fichiers de travail
+*.avant-*
+*.sauvegarde-*
+/scripts/
+/src/scripts/
+/src/inventaire-lecture-seule.js
+/actuel_stocks.controller.js
+/corriger-regions.js
+/diagnostic-regions.js
+/diagnostic.txt
+/fix-guerou.js
+/inventaire.txt
+/original_*
+/simulation.txt

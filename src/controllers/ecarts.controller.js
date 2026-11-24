@@ -122,6 +122,7 @@ async function traiterEcart(req, res) {
       etablissementId,
       numeroLot: ligne.lot.numeroLot,
       datePeremption: ligne.lot.datePeremption,
+      prixUnitaire: ligne.lot.prixUnitaire,
       quantite: ligne.quantiteRecue,
     });
 

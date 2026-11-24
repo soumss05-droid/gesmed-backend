@@ -21,6 +21,7 @@ const router = express.Router();
 
 router.get("/", authentifier, listerStocks);
 router.get("/reseau", authentifier, stockReseau);
+router.get("/carte", authentifier, require("../controllers/carte.controller").carteStocks);
 router.get("/cmm", authentifier, calculerCmm);
 router.get("/dmm-propre", authentifier, dmmPropre);
 router.get("/commande-suggeree", authentifier, commandeSuggeree);
@@ -37,5 +38,14 @@ router.post(
   entreeStock
 );
 router.post("/dispensation", authentifier, autoriser("FORMATION_SANITAIRE"), enregistrerDispensation);
+router.post("/dispensation/panier", authentifier, autoriser("FORMATION_SANITAIRE"), require("../controllers/dispensationPanier.controller").enregistrerDispensationPanier);
+
+// Annulation d'une dispensation : demande par la formation sanitaire, decision par le MCM / SASSM (roles controles dans le controleur).
+const annulations = require("../controllers/annulationsDispensation.controller");
+router.post("/dispensation/:dispensationId/demande-annulation", authentifier, annulations.demanderAnnulation);
+router.get("/dispensation/demandes-annulation", authentifier, annulations.mesDemandesAnnulation);
+router.get("/annulations/a-valider", authentifier, annulations.listerAnnulationsAValider);
+router.post("/annulations/:demandeId/decider", authentifier, annulations.deciderAnnulation);
+router.post("/dispensation/panier/apercu", authentifier, autoriser("FORMATION_SANITAIRE"), require("../controllers/apercuPanier.controller").apercuPanier);
 
 module.exports = router;
