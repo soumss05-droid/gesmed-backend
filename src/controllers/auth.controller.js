@@ -42,6 +42,7 @@ async function login(req, res) {
       utilisateur: {
         id: utilisateur.id,
         nomComplet: utilisateur.nomComplet,
+        doitChangerMotDePasse: utilisateur.doitChangerMotDePasse,
         role: "ADMIN",
         etablissement: null,
       },
@@ -91,6 +92,7 @@ async function login(req, res) {
     utilisateur: {
       id: utilisateur.id,
       nomComplet: utilisateur.nomComplet,
+      doitChangerMotDePasse: utilisateur.doitChangerMotDePasse,
       role: rattachement.role,
       etablissement: rattachement.etablissement.nom,
     },

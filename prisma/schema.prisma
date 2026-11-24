@@ -112,6 +112,7 @@ model Utilisateur {
   actif            Boolean             @default(true)
   createdAt        DateTime            @default(now()) @map("created_at")
   estAdminSysteme  Boolean             @default(false) @map("est_admin_systeme")
+  doitChangerMotDePasse Boolean @default(false) @map("doit_changer_mot_de_passe")
 
   etablissements   UserEtablissement[]
   mouvements       MouvementStock[]

@@ -32,7 +32,7 @@ async function changerMotDePasse(req, res) {
     const motDePasseHash = await hashPassword(nouveauMotDePasse);
     await prisma.utilisateur.update({
       where: { id: utilisateurId },
-      data: { motDePasseHash },
+      data: { motDePasseHash, doitChangerMotDePasse: false },
     });
 
     return res.json({ message: "Mot de passe modifié." });
