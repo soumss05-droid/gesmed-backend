@@ -628,6 +628,29 @@ async function entreeStock(req, res) {
     }
     etablissementId = camec.id;
   }
+  // Saisie initiale a la CAMEC par le GAS programme national (produits de son
+  // programme) et par la GAS Cellule (AUDITEUR rattache a "GAS Cellule", tous produits).
+  if (role === "GAS_PROGRAMME_NATIONAL" || role === "AUDITEUR") {
+    const moi = await prisma.etablissement.findUnique({ where: { id: req.utilisateur.etablissementId } });
+    if (role === "AUDITEUR" && (!moi || moi.nom !== "GAS Cellule")) {
+      return res.status(403).json({ erreur: "La saisie initiale est r\u00e9serv\u00e9e \u00e0 la GAS Cellule." });
+    }
+    const camecSaisie = await prisma.etablissement.findFirst({ where: { type: "CAMEC" } });
+    if (!camecSaisie) {
+      return res.status(500).json({ erreur: "Aucun \u00e9tablissement CAMEC trouv\u00e9 en base." });
+    }
+    if (role === "GAS_PROGRAMME_NATIONAL") {
+      if (!moi || !moi.programmeId) {
+        return res.status(403).json({ erreur: "Votre \u00e9tablissement n'est rattach\u00e9 \u00e0 aucun programme." });
+      }
+      const produitSaisi = produitId ? await prisma.produit.findUnique({ where: { id: produitId } }) : null;
+      if (produitSaisi && produitSaisi.programmeId !== moi.programmeId) {
+        return res.status(403).json({ erreur: "Vous ne pouvez saisir que les produits de votre programme." });
+      }
+    }
+    etablissementId = camecSaisie.id;
+  }
+
 
   const { utilisateurId } = req.utilisateur;
 

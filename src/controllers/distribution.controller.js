@@ -210,11 +210,27 @@ async function listerAxes(req, res) {
   return res.json(axesAvecWilayas);
 }
 
+// Lecture seule du resume par axe : le GAS programme national et l'AUDITEUR
+// consultent les axes a partir de l'etablissement CAMEC (tous les produits).
+// Les actions (associer, planifier, expedier) restent reservees a la CAMEC.
+async function camecEnLecture(req, res) {
+  const { role } = req.utilisateur;
+  if (role === "GAS_PROGRAMME_NATIONAL" || role === "AUDITEUR") {
+    const camec = await prisma.etablissement.findFirst({ where: { type: "CAMEC" } });
+    if (!camec) {
+      res.status(500).json({ erreur: "Aucun etablissement CAMEC trouve en base." });
+      return null;
+    }
+    return camec;
+  }
+  return exigerCamec(req, res);
+}
+
 // GET /distribution/axes/resume
 // Par axe : commandes associees, total a charger par produit (avec le stock
 // disponible a la CAMEC) et detail par etablissement destinataire.
 async function resumeParAxe(req, res) {
-  const etab = await exigerCamec(req, res);
+  const etab = await camecEnLecture(req, res);
   if (!etab) return undefined;
 
   const axes = await prisma.axe.findMany({ where: { actif: true }, orderBy: { nom: "asc" } });

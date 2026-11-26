@@ -34,7 +34,7 @@ router.post("/justification", authentifier, justifierStock);
 router.post(
   "/entree",
   authentifier,
-  autoriser("GESTIONNAIRE_CAMEC", "ADMIN", "GAS_MOUGHATAA", "GESTIONNAIRE_DRS", "FORMATION_SANITAIRE"),
+  autoriser("GESTIONNAIRE_CAMEC", "ADMIN", "GAS_MOUGHATAA", "GESTIONNAIRE_DRS", "FORMATION_SANITAIRE", "GAS_PROGRAMME_NATIONAL", "AUDITEUR"),
   entreeStock
 );
 router.post("/dispensation", authentifier, autoriser("FORMATION_SANITAIRE"), enregistrerDispensation);
