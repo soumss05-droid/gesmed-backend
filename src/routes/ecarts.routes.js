@@ -5,7 +5,10 @@ const { listerEcartsEnAttente, traiterEcart } = require("../controllers/ecarts.c
 
 const router = express.Router();
 
+// Consultation : GAS programme national et AUDITEUR (GAS Cellule)
 router.get("/en-attente", authentifier, autoriser("GAS_PROGRAMME_NATIONAL", "AUDITEUR"), listerEcartsEnAttente);
-router.post("/:blLigneId/decision", authentifier, autoriser("GAS_PROGRAMME_NATIONAL", "AUDITEUR"), traiterEcart);
+
+// Decision : reservee au GAS programme national (l'AUDITEUR ne tranche pas)
+router.post("/:blLigneId/decision", authentifier, autoriser("GAS_PROGRAMME_NATIONAL"), traiterEcart);
 
 module.exports = router;
